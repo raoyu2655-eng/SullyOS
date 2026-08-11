@@ -49,6 +49,7 @@ import {
 } from './agenticTools';
 import { getLocalDateKey } from './localDate';
 import { normalizeAssistantActionFormatting } from './assistantActionFormat';
+import { generateImage, getImageGenConfig, isImageGenConfigured } from './imageGenApi';
 
 // ─── 模块内辅助 ──────────────────────────────────────────────────────────────
 
@@ -574,6 +575,77 @@ export async function applyAssistantPostProcessing(
             setMessages(await DB.getRecentMessagesByCharId(char.id, 200));
         };
 
+        // `[[SEND_IMAGE: 画面描述]]` —— 角色现场画一张图发过来（见 utils/imageGenApi.ts）。
+        //
+        // 三条注意：
+        // 1. 没配生图 API 时**不该走到这里**（prompt 压根不教这个标签），但模型偶尔会自己编出来，
+        //    所以照样兜一手，降级成 `[图片：描述]` 文字气泡——跟表情找不到时的降级同一个思路：
+        //    静默丢弃会让整条主动消息变成 0 气泡，横幅响了点进去却空空如也。
+        // 2. 生图动辄十几秒，中间要让用户看见「在画了」，否则界面就是一段没有解释的干等。
+        // 3. 失败原因要说人话并留在气泡里。生图最常见的失败是余额不足 / 模型名写错，
+        //    只 console.warn 的话用户只会觉得「角色说要发图但没发」。
+        const sendImageBubble = async (description: string): Promise<void> => {
+            const cfg = getImageGenConfig();
+            const fallbackToText = async (note: string) => {
+                await persistMessage({
+                    charId: char.id, role: 'assistant', type: 'text',
+                    content: `[图片：${description}]`,
+                    metadata: takeMeta({ ...(mcdInheritMeta || {}), imageGenFailed: note }),
+                } as any);
+                setMessages(await DB.getRecentMessagesByCharId(char.id, 200));
+            };
+
+            if (!isImageGenConfigured(cfg)) {
+                console.warn('[ImageGen] 角色写了 [[SEND_IMAGE]] 但生图 API 没配，降级成文字气泡', { charId: char.id, description });
+                await fallbackToText('未配置生图 API');
+                return;
+            }
+
+            addToast(`${char.name} 正在画图...`, 'info');
+            try {
+                const result = await generateImage(description, cfg!);
+                await persistMessage({
+                    charId: char.id, role: 'assistant', type: 'image',
+                    content: result.content,
+                    metadata: takeMeta({
+                        ...(mcdInheritMeta || {}),
+                        imageGen: {
+                            description,
+                            prompt: result.finalPrompt,
+                            revisedPrompt: result.revisedPrompt,
+                            model: cfg!.model,
+                            size: cfg!.size,
+                            // 存链接（抓不回来时的兜底）的图会过期，标出来方便日后排查裂图。
+                            remote: result.isRemoteUrl || undefined,
+                        },
+                    }),
+                } as any);
+                setMessages(await DB.getRecentMessagesByCharId(char.id, 200));
+
+                // 顺手存进相册 —— 与用户自己发图时 Chat.tsx 的行为对齐（那边也是发完就入库）。
+                // 存的是链接形态时不入库：相册里挂一张几小时后必裂的图没有意义。
+                if ((cfg!.saveToGallery ?? true) && !result.isRemoteUrl) {
+                    try {
+                        await DB.saveGalleryImage({
+                            id: `img-gen-${Date.now()}-${Math.random()}`,
+                            charId: char.id,
+                            url: result.content,
+                            timestamp: messageTimestamp ?? Date.now(),
+                            savedDate: getLocalDateKey(new Date(messageTimestamp ?? Date.now())),
+                            chatContext: [`${char.name} 画的：${description}`],
+                        });
+                    } catch (e) {
+                        console.warn('[ImageGen] 存相册失败（图片本身已发出）:', e);
+                    }
+                }
+            } catch (e: any) {
+                const reason = e?.message || String(e);
+                console.error('[ImageGen] 生图失败:', reason);
+                addToast(`生图失败：${reason}`, 'error');
+                await fallbackToText(reason);
+            }
+        };
+
         // 把 [[QUOTE: ...]] / [回复 "..."] 的引用文本解析成"被回复的那条用户消息"。
         // 开了翻译的外语/粤语角色，引用文本往往是外语、或被 <原文>/<译文> 翻译标签包裹，
         // 跟库里中文用户消息逐字 includes 匹配会失败 → 之前表现为丢引用 / 空引用气泡。
@@ -627,6 +699,10 @@ export async function applyAssistantPostProcessing(
                 for (const part of ChatParser.splitResponse(segment)) {
                     if (part.type === 'emoji') {
                         await sendEmojiBubble(part.content);
+                        continue;
+                    }
+                    if (part.type === 'image') {
+                        await sendImageBubble(part.content);
                         continue;
                     }
                     const cleaned = ChatParser.sanitize(part.content);
@@ -685,6 +761,8 @@ export async function applyAssistantPostProcessing(
 
                 if (part.type === 'emoji') {
                     await sendEmojiBubble(part.content);
+                } else if (part.type === 'image') {
+                    await sendImageBubble(part.content);
                 } else {
                     const rawBlocks = part.content.split(/^\s*---\s*$/m).filter(b => b.trim());
                     const allChunks: string[] = [];

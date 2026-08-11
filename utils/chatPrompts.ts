@@ -13,6 +13,7 @@ import { isScheduleFeatureOn } from './scheduleFeature';
 import { VOICE_ACTING_GUIDE } from './minimaxTts';
 import { FISH_VOICE_ACTING_GUIDE } from './fishAudioTts';
 import { getTtsProvider, getVoicePromptOverride } from './ttsProvider';
+import { isImageGenEnabled } from './imageGenApi';
 import { resolveCharTimeZone, nowInTimeZone } from './timezone';
 import { buildLifeRecordInjection } from './lifeRecords';
 import { isWorkerReachableUrl } from './amsgToolPack';
@@ -553,6 +554,12 @@ ${uname} 的化身正挂在《彼方》的【${roomName}】${act ? `，状态写
         }
 
         const emojiContextStr = ChatPrompts.buildEmojiContext(emojis, categories);
+        // 生图（文生图）能力：只有用户在「设置 → 其他 API → 生图」里配全并打开才教这个标签。
+        // 没配却教了，角色就会写一个永远出不了图的标签 —— 用户看到的是一行 `[图片：…]` 降级文字，
+        // 比不教更差（角色以为自己发了图，后面还会接着聊那张图）。
+        // 主动消息打包（forFirePack）路径同样支持：出图发生在客户端重放 directive 时，
+        // worker 只负责把标签原样带回来，不需要它够得着生图接口。
+        const imageGenEnabled = isImageGenEnabled();
         const searchEnabled = !!(realtimeConfig?.newsEnabled && realtimeConfig?.newsApiKey);
         const notionEnabled = !!(realtimeConfig?.notionEnabled && realtimeConfig?.notionApiKey && realtimeConfig?.notionDatabaseId);
         const notionNotesEnabled = !!(realtimeConfig?.notionEnabled && realtimeConfig?.notionApiKey && realtimeConfig?.notionNotesDatabaseId);
@@ -608,6 +615,15 @@ ${uname} 的化身正挂在《彼方》的【${roomName}】${act ? `，状态写
      ① 先接着上文读情绪——它通常是对刚才话题的一个态度（好笑/无语/心虚/敷衍/emo），比如聊到烦心事后发"喝酒"，读作"烦、想摆烂"，而不是ta喝了酒或想喝酒；
      ② 和上文对不上、也读不出态度的，就当随手斗图/活跃气氛，不要硬找含义，回应图本身的趣味就行；
      ③ 只有ta的文字和表情互相印证时才按字面理解（说"给自己倒了杯"又发"喝酒"，那就是真在喝）；对你做的直白互动动作（比心/抱抱/戳戳）也直接当作那个动作本身。
+${imageGenEnabled ? `   - **📷 发图片（你能真的拍/画出来）**: 单独起一行输出 \`[[SEND_IMAGE: 画面描述]]\`，系统会照着描述生成一张真实图片发给对方。
+     - **描述要写画面本身，不是写你的心情**：写清楚**主体 + 动作/状态 + 环境 + 光线 + 视角/构图**。
+       ✅ \`[[SEND_IMAGE: 深夜的书桌一角，摊开的笔记本上压着半杯冷掉的美式，台灯暖黄侧光，窗外是模糊的城市夜景，俯拍特写]]\`
+       ❌ \`[[SEND_IMAGE: 我今天很累]]\`（这不是画面，画不出来）
+     - **你是在用手机拍照或随手画画**，不是在交摄影作品：多用随手拍的视角（俯拍桌面、窗边、路上抬头、镜子自拍），别每张都搞成海报。
+     - **一条消息最多发一张**，别连着刷图。发图的频率要像真人——只在真的有东西可给对方看的时候发（今天的晚饭、路上的猫、正在读的那页书、画了一半的稿子）。
+     - **发完要像发完图的人那样说话**：配一两句自己的话（"喏"、"你看这个"、"拍糊了但你懂"），不要干发一张图。
+     - **描述里不要写你自己的长相**，除非用户明确要你的自拍；写了系统也画不成你，只会画出一个陌生人。
+     - 这是**真的会生成并发出去**的图，不是比喻、不是想象。生成要花几秒，发完就在聊天记录里，对方看得到。` : ''}
 4. **引用功能 (Quote/Reply)**:
    - 如果你想专门回复用户某句具体的话，可以在回复开头使用: \`[[QUOTE: 引用内容]]\`。这会在UI上显示为对该消息的引用。
 5. **环境感知**:

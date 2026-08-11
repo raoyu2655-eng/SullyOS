@@ -583,6 +583,17 @@ export function sanitizeIntoSegments(text: string): Segment[] {
         });
         continue;
       }
+      if (part.kind === 'image') {
+        // banner 上只写「图片」这一层意思: 生图描述是写给模型看的画面清单
+        // (主体+光线+构图, 常有几十字英文), 原样塞进锁屏通知既挤爆一行也没人想读。
+        // 短描述留着当提示, 长的直接折成 [图片]。
+        const brief = part.description.length <= 12 ? `[图片：${part.description}]` : '[图片]';
+        segments.push({
+          raw: `[[SEND_IMAGE: ${part.description}]]`,
+          sanitized: brief,
+        });
+        continue;
+      }
       // 安全网: 占位符跟正文同行 (chunkText 没拆开) 时把整块还原回 raw,
       // sanitized 路径 sanitizeTextForBanner 会再把 [html]/<翻译>/<语音>/引用 折成 placeholder.
       let rawText = part.text.replace(
@@ -669,8 +680,16 @@ function chunkText(text: string): string[] {
 }
 
 /**
- * 把 chunk 里的 `[[SEND_EMOJI: 名称]]` 拆出来当独立 part. 跟客户端
- * `chatParser.splitResponse` 行为对齐 (输出 shape 不同, 这里用 kind 字段区分).
+ * 把 chunk 里的 `[[SEND_EMOJI: 名称]]` / `[[SEND_IMAGE: 画面描述]]` 拆出来当独立 part.
+ * 跟客户端 `chatParser.splitResponse` 行为对齐 (输出 shape 不同, 这里用 kind 字段区分).
+ *
+ * 两个标签必须同一趟扫: 分两趟会丢掉它们之间的先后顺序, 而客户端是按 segment 顺序
+ * 逐条落库的 —— 角色「先发图再发表情」就会变成「先表情后图」。
+ *
+ * SEND_IMAGE 必须在这里独立成段, 否则它会当普通文字走下去, 然后被
+ * sanitizeIntoSegments 那条「剥光 `[[...]]` 后为空就跳过」的规则整段丢掉 ——
+ * 表现为角色说要发图、推送里一条都没有。banner 侧展示成 `[图片]`(描述过长时)
+ * 或 `[图片：描述]`, 用户在锁屏看到什么, 点进去就是什么。
  *
  * 冒号容全角 (`[[SEND_EMOJI：抱抱]]`): 拆出来后 raw 按半角规范形态重写, 客户端拿到的
  * 永远是它认得的那一种。不容的话这段会当普通文字走下去, banner 上直接是裸标签。
@@ -678,16 +697,29 @@ function chunkText(text: string): string[] {
 function splitOnSendEmoji(chunk: string): Array<
   | { kind: 'text'; text: string }
   | { kind: 'emoji'; name: string }
+  | { kind: 'image'; description: string }
 > {
-  const re = /\[\[SEND_EMOJI[:：]\s*(.*?)\]\]/g;
-  const parts: Array<{ kind: 'text'; text: string } | { kind: 'emoji'; name: string }> = [];
+  // `[^\[\]]*?` 与 chatParser.splitResponse 同口径: 允许换行 (生图描述常写得长),
+  // 但不许跨过方括号 —— 漏写闭合的标签不该把后面的正文和标签一起吞掉。
+  const re = /\[\[(SEND_EMOJI|SEND_IMAGE)[:：]\s*([^\[\]]*?)\]\]/g;
+  const parts: Array<
+    | { kind: 'text'; text: string }
+    | { kind: 'emoji'; name: string }
+    | { kind: 'image'; description: string }
+  > = [];
   let lastIndex = 0;
   let m: RegExpExecArray | null;
   while ((m = re.exec(chunk)) !== null) {
     if (m.index > lastIndex) {
       parts.push({ kind: 'text', text: chunk.slice(lastIndex, m.index) });
     }
-    parts.push({ kind: 'emoji', name: m[1].trim() });
+    const payload = m[2].trim();
+    // 空 payload 整个丢掉 (客户端同口径): 空表情名配不上图库, 空描述调生图只会白烧额度。
+    if (payload) {
+      parts.push(m[1] === 'SEND_IMAGE'
+        ? { kind: 'image', description: payload }
+        : { kind: 'emoji', name: payload });
+    }
     lastIndex = m.index + m[0].length;
   }
   if (lastIndex < chunk.length) {

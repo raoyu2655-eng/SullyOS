@@ -42,6 +42,8 @@ import {
 } from '../utils/avatarModelBackup';
 import { normalizeApiBaseUrl, normalizeApiCredential, normalizeApiModel } from '../utils/apiConfigNormalize';
 import { describeImageWithVisionApi, VISION_API_TEST_IMAGE_DATA_URL, visionApiConfigFromPreset } from '../utils/visionApi';
+import { generateImage, IMAGE_SIZE_PRESETS } from '../utils/imageGenApi';
+import type { ImageGenApiConfig } from '../types';
 
 // hot_news（news.orz.ai）可选热榜平台。key 必须与 API 的 ?platform= 完全一致。
 const HOTNEWS_PLATFORM_OPTIONS: { key: string; label: string }[] = [
@@ -477,6 +479,22 @@ const Settings: React.FC = () => {
     apiConfig.minimaxRegion === 'overseas' ? 'overseas' : 'domestic'
   );
   const [localAceStepKey, setLocalAceStepKey] = useState(apiConfig.aceStepApiKey || '');
+  // ── 生图 API（文生图）——角色写 [[SEND_IMAGE: 描述]] 时调它出图 ──
+  const [localImgGenEnabled, setLocalImgGenEnabled] = useState(apiConfig.imageGenApi?.enabled === true);
+  const [localImgGenUrl, setLocalImgGenUrl] = useState(apiConfig.imageGenApi?.baseUrl || '');
+  const [localImgGenKey, setLocalImgGenKey] = useState(apiConfig.imageGenApi?.apiKey || '');
+  const [localImgGenModel, setLocalImgGenModel] = useState(apiConfig.imageGenApi?.model || '');
+  const [localImgGenSize, setLocalImgGenSize] = useState(apiConfig.imageGenApi?.size ?? '1024x1024');
+  const [localImgGenTemplate, setLocalImgGenTemplate] = useState(apiConfig.imageGenApi?.promptTemplate || '');
+  const [localImgGenNegative, setLocalImgGenNegative] = useState(apiConfig.imageGenApi?.negativePrompt || '');
+  const [localImgGenFormat, setLocalImgGenFormat] = useState<'b64_json' | 'url' | 'auto'>(apiConfig.imageGenApi?.responseFormat ?? 'b64_json');
+  const [localImgGenExtra, setLocalImgGenExtra] = useState(apiConfig.imageGenApi?.extraBody || '');
+  const [localImgGenGallery, setLocalImgGenGallery] = useState(apiConfig.imageGenApi?.saveToGallery ?? true);
+  const [showImgGenAdvanced, setShowImgGenAdvanced] = useState(false);
+  const [imgGenStatusMsg, setImgGenStatusMsg] = useState('');
+  const [testingImgGen, setTestingImgGen] = useState(false);
+  // 测试结果保留预览图：光说「成功」用户还是不知道画出来的是什么风格 / 尺寸对不对。
+  const [imgGenTestResult, setImgGenTestResult] = useState<{ ok: boolean; msg: string; preview?: string } | null>(null);
   const [localTtsProvider, setLocalTtsProvider] = useState<'minimax' | 'fishaudio'>(
     apiConfig.ttsProvider === 'fishaudio' ? 'fishaudio' : 'minimax'
   );
@@ -829,6 +847,16 @@ const Settings: React.FC = () => {
       setLocalMiniMaxGroupId(apiConfig.minimaxGroupId || '');
       setLocalMiniMaxRegion(apiConfig.minimaxRegion === 'overseas' ? 'overseas' : 'domestic');
       setLocalAceStepKey(apiConfig.aceStepApiKey || '');
+      setLocalImgGenEnabled(apiConfig.imageGenApi?.enabled === true);
+      setLocalImgGenUrl(apiConfig.imageGenApi?.baseUrl || '');
+      setLocalImgGenKey(apiConfig.imageGenApi?.apiKey || '');
+      setLocalImgGenModel(apiConfig.imageGenApi?.model || '');
+      setLocalImgGenSize(apiConfig.imageGenApi?.size ?? '1024x1024');
+      setLocalImgGenTemplate(apiConfig.imageGenApi?.promptTemplate || '');
+      setLocalImgGenNegative(apiConfig.imageGenApi?.negativePrompt || '');
+      setLocalImgGenFormat(apiConfig.imageGenApi?.responseFormat ?? 'b64_json');
+      setLocalImgGenExtra(apiConfig.imageGenApi?.extraBody || '');
+      setLocalImgGenGallery(apiConfig.imageGenApi?.saveToGallery ?? true);
       setLocalTtsProvider(apiConfig.ttsProvider === 'fishaudio' ? 'fishaudio' : 'minimax');
       setLocalFishKey(apiConfig.fishAudioApiKey || '');
       setLocalFishModel(apiConfig.fishAudioModel || 's2.1-pro');
@@ -1044,6 +1072,72 @@ const Settings: React.FC = () => {
       trackEvent('测试识图 API', { result: '失败' });
     } finally {
       setTestingVisionApi(false);
+    }
+  };
+
+  /** 把当前表单拼成一份 ImageGenApiConfig（保存和测试共用，保证测的就是要存的那份）。 */
+  const buildImageGenConfig = (): ImageGenApiConfig => ({
+    enabled: localImgGenEnabled,
+    baseUrl: normalizeApiBaseUrl(localImgGenUrl),
+    apiKey: normalizeApiCredential(localImgGenKey),
+    model: normalizeApiModel(localImgGenModel),
+    size: localImgGenSize.trim(),
+    promptTemplate: localImgGenTemplate.trim(),
+    negativePrompt: localImgGenNegative.trim(),
+    responseFormat: localImgGenFormat,
+    extraBody: localImgGenExtra.trim(),
+    saveToGallery: localImgGenGallery,
+  });
+
+  const handleSaveImageGenApi = () => {
+    const next = buildImageGenConfig();
+    if (next.enabled && (!next.baseUrl || !next.apiKey || !next.model)) {
+      addToast('开启生图 API 前，请填写完整的 URL、Key 和模型', 'error');
+      return;
+    }
+    if (next.extraBody) {
+      // 存之前先验一遍 JSON：不然错的那份要等角色真的发图时才会在 console 里冒出来，
+      // 用户看到的只是「角色说要画图，结果发了行文字」。
+      try {
+        const parsed = JSON.parse(next.extraBody);
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('不是对象');
+      } catch {
+        addToast('「附加参数」不是合法的 JSON 对象，请检查（例：{"steps":20}）', 'error');
+        return;
+      }
+    }
+    setLocalImgGenUrl(next.baseUrl);
+    setLocalImgGenKey(next.apiKey);
+    setLocalImgGenModel(next.model);
+    updateApiConfig({ imageGenApi: next });
+    setImgGenStatusMsg(next.enabled ? '生图 API 已接入，角色可以发图了' : '已关闭，角色不会再发图');
+    setTimeout(() => setImgGenStatusMsg(''), 2400);
+  };
+
+  const handleTestImageGen = async () => {
+    // 测试时强制 enabled：用户多半是想「先试通了再打开开关」。
+    const cfg: ImageGenApiConfig = { ...buildImageGenConfig(), enabled: true };
+    if (!cfg.baseUrl || !cfg.apiKey || !cfg.model) {
+      setImgGenTestResult({ ok: false, msg: '请先填写完整的 URL、Key 和模型' });
+      return;
+    }
+    setTestingImgGen(true);
+    setImgGenTestResult(null);
+    try {
+      const result = await generateImage('a cute cat sitting on a windowsill, soft morning light', cfg);
+      setImgGenTestResult({
+        ok: true,
+        msg: result.isRemoteUrl
+          ? '出图成功，但图片是以链接形式存的（跨域抓不回来），聊天记录里的图日后可能失效——建议把「返回格式」改成 b64_json'
+          : `出图成功（${cfg.size || '服务端默认尺寸'}）`,
+        preview: result.content,
+      });
+      trackEvent('测试生图 API', { result: '成功' });
+    } catch (error: any) {
+      setImgGenTestResult({ ok: false, msg: error?.message || '未知错误' });
+      trackEvent('测试生图 API', { result: '失败' });
+    } finally {
+      setTestingImgGen(false);
     }
   };
 
@@ -2494,6 +2588,257 @@ const Settings: React.FC = () => {
                         visionTestResult.startsWith('✅') ? 'bg-emerald-50 text-emerald-700' : 'bg-red-50 text-red-600'
                     }`}>
                         {visionTestResult}
+                    </div>
+                )}
+            </div>
+        </SettingsSection>
+
+        {/* 生图 API：角色在聊天里写 [[SEND_IMAGE: 描述]] 时调它出图（utils/imageGenApi.ts）。 */}
+        <SettingsSection
+            title="生图 API"
+            badge={
+                <span className={`text-[9px] font-bold px-2 py-1 rounded-full ${
+                    apiConfig.imageGenApi?.enabled ? 'bg-pink-100 text-pink-600' : 'bg-slate-100 text-slate-400'
+                }`}>
+                    {apiConfig.imageGenApi?.enabled ? '已接入' : '未接入'}
+                </span>
+            }
+            icon={
+                <div className="p-2 bg-pink-100/60 rounded-xl text-pink-600">
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-4 h-4">
+                        <path strokeLinecap="round" strokeLinejoin="round" d="m2.25 15.75 5.159-5.159a2.25 2.25 0 0 1 3.182 0l5.159 5.159m-1.5-1.5 1.409-1.409a2.25 2.25 0 0 1 3.182 0l2.909 2.909m-18 3.75h16.5a1.5 1.5 0 0 0 1.5-1.5V6a1.5 1.5 0 0 0-1.5-1.5H3.75A1.5 1.5 0 0 0 2.25 6v12a1.5 1.5 0 0 0 1.5 1.5Zm10.5-11.25h.008v.008h-.008V8.25Zm.375 0a.375.375 0 1 1-.75 0 .375.375 0 0 1 .75 0Z" />
+                    </svg>
+                </div>
+            }
+        >
+            <div className="space-y-4">
+                <div className="rounded-2xl border border-pink-100 bg-pink-50/60 p-3.5">
+                    <div className="flex items-center justify-between gap-3">
+                        <div>
+                            <div className="text-xs font-bold text-slate-600">让角色能真的发图</div>
+                            <p className="text-[10px] text-slate-400 mt-1 leading-relaxed">
+                                开启后角色可以在聊天里现场画一张图发给你。
+                            </p>
+                        </div>
+                        <button
+                            type="button"
+                            role="switch"
+                            aria-checked={localImgGenEnabled}
+                            onClick={() => setLocalImgGenEnabled(v => !v)}
+                            className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors ${localImgGenEnabled ? 'bg-pink-500' : 'bg-slate-200'}`}
+                        >
+                            <span className={`inline-block h-5 w-5 rounded-full bg-white shadow transition-transform ${localImgGenEnabled ? 'translate-x-5' : 'translate-x-0.5'}`} />
+                        </button>
+                    </div>
+                </div>
+
+                <p className="text-[10px] text-slate-400 leading-relaxed px-1">
+                    开启并保存后，角色的提示词里会多出一条
+                    <span className="font-semibold text-pink-600"> [[SEND_IMAGE: 画面描述]] </span>
+                    能力：它想给你看什么（今天的晚饭、路上的猫、画了一半的稿子）就自己写一段描述，
+                    系统拿去调下面这个接口出图，当成一张真图片发进聊天。<span className="text-slate-500 font-medium">每张图都会走一次你自己的生图额度</span>，关掉即停。
+                </p>
+
+                <div className={`space-y-3 transition-opacity ${localImgGenEnabled ? 'opacity-100' : 'opacity-50'}`}>
+                    <div>
+                        <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1.5 block pl-1">URL</label>
+                        <input
+                            type="text"
+                            value={localImgGenUrl}
+                            onChange={e => { setLocalImgGenUrl(e.target.value); setImgGenTestResult(null); }}
+                            disabled={!localImgGenEnabled}
+                            placeholder="https://api.openai.com/v1"
+                            className="w-full bg-white/60 border border-slate-200/60 rounded-xl px-4 py-2.5 text-sm font-mono focus:bg-white transition-all disabled:cursor-not-allowed"
+                        />
+                        <p className="text-[9px] text-slate-300 mt-1 pl-1">填到 /v1 就行，末尾的 /images/generations 会自动补。</p>
+                    </div>
+                    <div>
+                        <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1.5 block pl-1">Key</label>
+                        <input
+                            type="password"
+                            name="image-gen-api-key"
+                            autoComplete="new-password"
+                            spellCheck={false}
+                            value={localImgGenKey}
+                            onChange={e => { setLocalImgGenKey(e.target.value); setImgGenTestResult(null); }}
+                            disabled={!localImgGenEnabled}
+                            placeholder="sk-..."
+                            className="w-full bg-white/60 border border-slate-200/60 rounded-xl px-4 py-2.5 text-sm font-mono focus:bg-white transition-all disabled:cursor-not-allowed"
+                        />
+                    </div>
+                    <div>
+                        <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1.5 block pl-1">生图模型</label>
+                        <input
+                            type="text"
+                            value={localImgGenModel}
+                            onChange={e => { setLocalImgGenModel(e.target.value); setImgGenTestResult(null); }}
+                            disabled={!localImgGenEnabled}
+                            placeholder="dall-e-3 / Kwai-Kolors/Kolors / flux-schnell ..."
+                            className="w-full bg-white/60 border border-slate-200/60 rounded-xl px-4 py-2.5 text-sm font-mono focus:bg-white transition-all disabled:cursor-not-allowed"
+                        />
+                        <p className="text-[9px] text-slate-300 mt-1 pl-1">照抄你的服务商文档里的生图模型名（跟聊天模型不是同一个）。</p>
+                    </div>
+
+                    <div>
+                        <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1.5 block pl-1">图片尺寸</label>
+                        <div className="flex gap-2 flex-wrap mb-2">
+                            {IMAGE_SIZE_PRESETS.map(preset => (
+                                <button
+                                    key={preset.value}
+                                    type="button"
+                                    disabled={!localImgGenEnabled}
+                                    onClick={() => { setLocalImgGenSize(preset.value); setImgGenTestResult(null); }}
+                                    className={`px-3 py-1.5 rounded-lg border text-[11px] font-medium transition-colors disabled:cursor-not-allowed ${
+                                        localImgGenSize === preset.value
+                                            ? 'bg-pink-100 border-pink-200 text-pink-700'
+                                            : 'bg-white border-slate-200 text-slate-500 hover:border-pink-200'
+                                    }`}
+                                >
+                                    {preset.label}
+                                </button>
+                            ))}
+                        </div>
+                        <input
+                            type="text"
+                            value={localImgGenSize}
+                            onChange={e => { setLocalImgGenSize(e.target.value); setImgGenTestResult(null); }}
+                            disabled={!localImgGenEnabled}
+                            placeholder="1024x1024（也可手填任意 宽x高；留空 = 用服务端默认）"
+                            className="w-full bg-white/60 border border-slate-200/60 rounded-xl px-4 py-2.5 text-sm font-mono focus:bg-white transition-all disabled:cursor-not-allowed"
+                        />
+                        <p className="text-[9px] text-slate-300 mt-1 pl-1">不同模型支持的尺寸不一样，填了不支持的值会报错——报错就换一个预设试试。</p>
+                    </div>
+
+                    <div>
+                        <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1.5 block pl-1">生图提示词（画风模板）</label>
+                        <textarea
+                            value={localImgGenTemplate}
+                            onChange={e => { setLocalImgGenTemplate(e.target.value); setImgGenTestResult(null); }}
+                            disabled={!localImgGenEnabled}
+                            rows={3}
+                            spellCheck={false}
+                            placeholder="例：masterpiece, best quality, 日系插画风格, 柔和光线, {prompt}"
+                            className="w-full bg-white/60 border border-slate-200/60 rounded-xl px-3 py-2.5 text-xs font-mono leading-relaxed focus:bg-white transition-all resize-y disabled:cursor-not-allowed"
+                        />
+                        <p className="text-[9px] text-slate-300 mt-1 pl-1">
+                            统一画风用。写 <span className="font-mono text-slate-400">{'{prompt}'}</span> 的地方会被角色写的描述替换；
+                            不写 <span className="font-mono text-slate-400">{'{prompt}'}</span> 就当前缀拼在描述前面。留空 = 直接用角色写的描述。
+                        </p>
+                    </div>
+
+                    <button
+                        type="button"
+                        onClick={() => setShowImgGenAdvanced(v => !v)}
+                        className="text-[11px] font-semibold text-pink-500 hover:text-pink-600 active:scale-95 transition-all flex items-center gap-1 pl-1"
+                    >
+                        {showImgGenAdvanced ? '收起高级选项' : '高级选项（负向词 / 返回格式 / 附加参数）'}
+                        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className={`w-3 h-3 transition-transform ${showImgGenAdvanced ? 'rotate-180' : ''}`}>
+                            <path fillRule="evenodd" d="M5.22 8.22a.75.75 0 0 1 1.06 0L10 11.94l3.72-3.72a.75.75 0 1 1 1.06 1.06l-4.25 4.25a.75.75 0 0 1-1.06 0L5.22 9.28a.75.75 0 0 1 0-1.06Z" clipRule="evenodd" />
+                        </svg>
+                    </button>
+
+                    {showImgGenAdvanced && (
+                        <div className="space-y-3 rounded-2xl border border-pink-100 bg-white/60 p-3 animate-slide-down">
+                            <div>
+                                <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1.5 block pl-1">负向提示词</label>
+                                <input
+                                    type="text"
+                                    value={localImgGenNegative}
+                                    onChange={e => setLocalImgGenNegative(e.target.value)}
+                                    disabled={!localImgGenEnabled}
+                                    placeholder="lowres, bad anatomy, watermark, text"
+                                    className="w-full bg-white/60 border border-slate-200/60 rounded-xl px-4 py-2.5 text-sm font-mono focus:bg-white transition-all disabled:cursor-not-allowed"
+                                />
+                                <p className="text-[9px] text-slate-300 mt-1 pl-1">以 negative_prompt 传给服务端；DALL·E 这类不支持的会直接忽略它。</p>
+                            </div>
+                            <div>
+                                <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1.5 block pl-1">返回格式</label>
+                                <div className="flex gap-2">
+                                    {([
+                                        { v: 'b64_json' as const, label: 'b64_json（推荐）' },
+                                        { v: 'url' as const, label: 'url' },
+                                        { v: 'auto' as const, label: '不指定' },
+                                    ]).map(opt => (
+                                        <button
+                                            key={opt.v}
+                                            type="button"
+                                            disabled={!localImgGenEnabled}
+                                            onClick={() => { setLocalImgGenFormat(opt.v); setImgGenTestResult(null); }}
+                                            className={`flex-1 px-2 py-2 rounded-lg border text-[11px] font-medium transition-colors disabled:cursor-not-allowed ${
+                                                localImgGenFormat === opt.v
+                                                    ? 'bg-pink-100 border-pink-200 text-pink-700'
+                                                    : 'bg-white border-slate-200 text-slate-500'
+                                            }`}
+                                        >
+                                            {opt.label}
+                                        </button>
+                                    ))}
+                                </div>
+                                <p className="text-[9px] text-slate-300 mt-1 pl-1">
+                                    b64_json 直接拿到图片本体，跟着聊天记录一起存、一起备份，最稳。选 url 的话图存的是链接，多半几小时后就失效了。
+                                    服务端不支持 b64_json 时才改这里。
+                                </p>
+                            </div>
+                            <div>
+                                <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1.5 block pl-1">附加参数（JSON）</label>
+                                <textarea
+                                    value={localImgGenExtra}
+                                    onChange={e => setLocalImgGenExtra(e.target.value)}
+                                    disabled={!localImgGenEnabled}
+                                    rows={3}
+                                    spellCheck={false}
+                                    placeholder={'{"steps": 20, "cfg_scale": 7}'}
+                                    className="w-full bg-white/60 border border-slate-200/60 rounded-xl px-3 py-2.5 text-xs font-mono leading-relaxed focus:bg-white transition-all resize-y disabled:cursor-not-allowed"
+                                />
+                                <p className="text-[9px] text-slate-300 mt-1 pl-1">合并进请求体，同名字段覆盖上面的设置。给服务商的私有参数用。</p>
+                            </div>
+                            <label className="flex items-center justify-between gap-3 pl-1">
+                                <span className="text-[11px] text-slate-500 font-medium">生成的图存进相册</span>
+                                <button
+                                    type="button"
+                                    role="switch"
+                                    aria-checked={localImgGenGallery}
+                                    disabled={!localImgGenEnabled}
+                                    onClick={() => setLocalImgGenGallery(v => !v)}
+                                    className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors ${localImgGenGallery ? 'bg-pink-500' : 'bg-slate-200'}`}
+                                >
+                                    <span className={`inline-block h-5 w-5 rounded-full bg-white shadow transition-transform ${localImgGenGallery ? 'translate-x-5' : 'translate-x-0.5'}`} />
+                                </button>
+                            </label>
+                        </div>
+                    )}
+                </div>
+
+                <div className="grid grid-cols-2 gap-2">
+                    <button
+                        type="button"
+                        onClick={handleTestImageGen}
+                        disabled={testingImgGen || !localImgGenUrl.trim() || !localImgGenKey.trim() || !localImgGenModel.trim()}
+                        className="py-3 rounded-2xl font-bold text-pink-600 border border-pink-200 bg-pink-50 active:scale-95 transition-all disabled:opacity-40"
+                    >
+                        {testingImgGen ? '出图中…' : '🎨 测试生图'}
+                    </button>
+                    <button
+                        type="button"
+                        onClick={handleSaveImageGenApi}
+                        disabled={testingImgGen}
+                        className="py-3 rounded-2xl font-bold text-white shadow-lg shadow-pink-500/20 bg-pink-500 active:scale-95 transition-all disabled:opacity-50"
+                    >
+                        保存生图 API
+                    </button>
+                </div>
+                {imgGenStatusMsg && (
+                    <div className="text-[11px] text-center text-pink-600 bg-pink-50 px-3 py-2 rounded-xl">{imgGenStatusMsg}</div>
+                )}
+                <p className="text-[9px] text-slate-300 px-1">测试会用固定描述「窗台上的猫」真出一张图，消耗一次生图额度。</p>
+                {imgGenTestResult && (
+                    <div className={`text-xs px-3 py-2 rounded-xl leading-relaxed ${
+                        imgGenTestResult.ok ? 'bg-emerald-50 text-emerald-700' : 'bg-red-50 text-red-600'
+                    }`}>
+                        <div>{imgGenTestResult.ok ? '✅ ' : '❌ '}{imgGenTestResult.msg}</div>
+                        {imgGenTestResult.preview && (
+                            <img src={imgGenTestResult.preview} alt="测试出图" className="mt-2 max-w-[180px] rounded-xl shadow-sm" />
+                        )}
                     </div>
                 )}
             </div>

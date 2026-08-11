@@ -238,11 +238,53 @@ export interface VisionApiConfig {
   model: string;
 }
 
+/**
+ * 生图 API（文生图）配置 —— 角色在聊天里写 `[[SEND_IMAGE: 画面描述]]` 时，
+ * 拿这份配置去调第三方生图接口，把出来的图当成一条 image 消息发出来。
+ *
+ * 走 OpenAI 兼容的 `POST {baseUrl}/images/generations`（DALL·E / 硅基流动 /
+ * one-api、new-api 这类中转站、以及绝大多数自建 SD 网关都认这个形状）。
+ * 私有字段（negative_prompt / steps / cfg_scale 之类）用 extraBody 补。
+ */
+export interface ImageGenApiConfig {
+  /** 总开关。关掉 → 不注入提示词、角色写了标签也只降级成一行文字。 */
+  enabled: boolean;
+  /** 形如 https://api.openai.com/v1；末尾 /images/generations 由代码补。 */
+  baseUrl: string;
+  apiKey: string;
+  /** 生图模型名，如 dall-e-3 / Kwai-Kolors/Kolors / flux-schnell。 */
+  model: string;
+  /** 图片尺寸，如 1024x1024。留空 → 不传 size 字段（用服务端默认）。 */
+  size?: string;
+  /**
+   * 生图提示词模板：统一画风 / 加质量词用。含 `{prompt}` 时角色写的描述替换到该处，
+   * 不含则当作前缀拼在描述之前。留空 → 直接用角色写的描述。
+   */
+  promptTemplate?: string;
+  /** 负向提示词。有值时作为 negative_prompt 传给服务端（不支持的服务端会忽略）。 */
+  negativePrompt?: string;
+  /**
+   * 期望的返回形态：
+   * - 'b64_json'（默认）→ 请求里带 response_format: 'b64_json'，直接拿 base64，最稳；
+   * - 'url'            → 服务端回图片链接，前端再抓回来转 base64（抓不动就直接存链接，会过期）；
+   * - 'auto'           → 不传 response_format，两种返回都认。
+   */
+  responseFormat?: 'b64_json' | 'url' | 'auto';
+  /** 追加进请求体的 JSON 字符串（如 {"steps":20,"cfg_scale":7}）。解析失败则忽略。 */
+  extraBody?: string;
+  /** 单次生图超时（毫秒）。缺省 → 120000。 */
+  timeoutMs?: number;
+  /** 生成的图是否顺手存进相册。缺省 → true。 */
+  saveToGallery?: boolean;
+}
+
 export interface APIConfig {
   baseUrl: string;
   apiKey: string;
   // 可选识图中转：给不支持 image_url 的主模型补视觉能力。
   visionApi?: VisionApiConfig;
+  // 可选文生图：角色写 [[SEND_IMAGE: 描述]] 时调第三方生图接口出图。
+  imageGenApi?: ImageGenApiConfig;
   minimaxApiKey?: string;
   minimaxGroupId?: string;
   // 'domestic' → https://api.minimaxi.com (国内站)

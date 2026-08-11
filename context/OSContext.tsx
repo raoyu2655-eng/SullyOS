@@ -61,6 +61,7 @@ import { loadMusicPlaybackSnapshot } from './MusicContext';
 import { setCharNameRegistry } from '../utils/charNameRegistry';
 import { setMinimaxRegion } from '../utils/minimaxEndpoint';
 import { setTtsProvider, setVoicePromptOverrides } from '../utils/ttsProvider';
+import { generateImage, getImageGenConfig, isImageGenConfigured, setImageGenConfig } from '../utils/imageGenApi';
 import { LocalNotifications } from '@capacitor/local-notifications';
 import { Capacitor } from '@capacitor/core';
 import { formatBytes } from '../utils/format';
@@ -2090,6 +2091,11 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
   useEffect(() => {
     setVoicePromptOverrides(apiConfig.voicePrompts);
   }, [apiConfig.voicePrompts]);
+  // 同步生图 API 配置（同上）。chatPrompts 靠它决定这一轮教不教 [[SEND_IMAGE]]，
+  // applyAssistantPostProcessing / 主动消息落库时靠它拿到 baseUrl+Key+模型去出图。
+  useEffect(() => {
+    setImageGenConfig(apiConfig.imageGenApi);
+  }, [apiConfig.imageGenApi]);
   const userProfileRef = useRef(userProfile);
   userProfileRef.current = userProfile;
   const groupsRef = useRef(groups);
@@ -2365,6 +2371,60 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
                   // 把每对原文/译文落成一条 text 消息,内容用 `\n%%BILINGUAL%%\n` 串联供渲染端识别。
                   const hasTranslationTags = /<翻译>\s*<原文>[\s\S]*?<\/原文>\s*<译文>[\s\S]*?<\/译文>\s*<\/翻译>/.test(aiContent);
 
+                  // `[[SEND_IMAGE: 描述]]` —— 角色现场画图（见 utils/imageGenApi.ts）。
+                  // 与 applyAssistantPostProcessing 的 sendImageBubble 同款：出图失败 / 没配 API
+                  // 一律降级成 `[图片：描述]` 文字气泡，绝不静默丢 —— 主动消息把每个标签切成独立
+                  // 一条推送，丢一条就是「横幅响了、点进去没有」。
+                  // 双语和普通两条分支共用它，所以定义在这一层。
+                  const sendImageBubble = async (description: string): Promise<void> => {
+                      const imgCfg = getImageGenConfig();
+                      const meta = consumeThinkingMeta();
+                      const saveFallback = async (note: string) => {
+                          const fallbackText = `[图片：${description}]`;
+                          await DB.saveMessage({
+                              charId,
+                              role: 'assistant',
+                              type: 'text',
+                              content: fallbackText,
+                              timestamp: baseTimestamp + offset,
+                              metadata: { ...(meta || {}), imageGenFailed: note },
+                          } as any);
+                          savedPreviewChunks.push(fallbackText);
+                          offset += 1;
+                      };
+                      if (!isImageGenConfigured(imgCfg)) {
+                          console.warn('[ImageGen/Proactive] 角色写了 [[SEND_IMAGE]] 但生图 API 没配', { charId, description });
+                          await saveFallback('未配置生图 API');
+                          return;
+                      }
+                      try {
+                          const result = await generateImage(description, imgCfg!);
+                          await DB.saveMessage({
+                              charId,
+                              role: 'assistant',
+                              type: 'image',
+                              content: result.content,
+                              timestamp: baseTimestamp + offset,
+                              metadata: {
+                                  ...(meta || {}),
+                                  imageGen: {
+                                      description,
+                                      prompt: result.finalPrompt,
+                                      revisedPrompt: result.revisedPrompt,
+                                      model: imgCfg!.model,
+                                      size: imgCfg!.size,
+                                      remote: result.isRemoteUrl || undefined,
+                                  },
+                              },
+                          } as any);
+                          savedPreviewChunks.push('[图片]');
+                          offset += 1;
+                      } catch (e: any) {
+                          console.error('[ImageGen/Proactive] 生图失败:', e?.message || e);
+                          await saveFallback(e?.message || String(e));
+                      }
+                  };
+
                   if (hasTranslationTags) {
                       // 表情包按模型写的位置原地插发（与 applyAssistantPostProcessing 双语分支同款修复）。
                       // 旧实现先把所有 [[SEND_EMOJI:]] 抽走、正文发完后统一追加到最后（还去了重），
@@ -2388,6 +2448,10 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
                           for (const part of ChatParser.splitResponse(segment)) {
                               if (part.type === 'emoji') {
                                   await sendEmojiBubble(part.content);
+                                  continue;
+                              }
+                              if (part.type === 'image') {
+                                  await sendImageBubble(part.content);
                                   continue;
                               }
                               const cleaned = ChatParser.sanitize(part.content);
@@ -2475,6 +2539,11 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
                                   savedPreviewChunks.push(fallbackText);
                               }
                               offset += 1;
+                              continue;
+                          }
+
+                          if (part.type === 'image') {
+                              await sendImageBubble(part.content);
                               continue;
                           }
 

@@ -503,19 +503,32 @@ export const ChatParser = {
         return stripped.length > 0;
     },
 
-    // Split text into bubbles (text and emojis)
-    splitResponse: (content: string): { type: 'text' | 'emoji', content: string }[] => {
-        const emojiPattern = /\[\[SEND_EMOJI:\s*(.*?)\]\]/g;
-        const parts: {type: 'text' | 'emoji', content: string}[] = [];
+    // Split text into bubbles (text / emojis / 生图)
+    //
+    // 表情和生图共用一条扫描：两者都是「按模型写的位置原地插一条非文字气泡」，
+    // 分两趟扫会丢掉它们彼此之间的先后顺序（角色先发图再发表情，就会变成先表情后图）。
+    // 全角冒号一并容 —— 中文输入法下 `[[SEND_IMAGE：…]]` 是高频手写变体，跟
+    // sanitize.ts 里 SEND_EMOJI 容全角冒号同一个理由。
+    splitResponse: (content: string): { type: 'text' | 'emoji' | 'image', content: string }[] => {
+        // `[^\[\]]*?` 而不是 `.*?`：描述里允许换行（生图 prompt 常写得很长），但不许跨过方括号。
+        // 放行方括号的话，模型漏写闭合的 `[[SEND_IMAGE: 没闭合` 会一路吞到下一个标签的 `]]`，
+        // 把半段正文连同后面那个 `[[SEND_EMOJI]]` 一起吃成图片描述。
+        // 「标签内不含方括号」也是 chunkText 那条括号保护正则用的同一个约定。
+        const tagPattern = /\[\[(SEND_EMOJI|SEND_IMAGE)[:：]\s*([^\[\]]*?)\]\]/g;
+        const parts: {type: 'text' | 'emoji' | 'image', content: string}[] = [];
         let lastIndex = 0;
         let emojiMatch;
 
-        while ((emojiMatch = emojiPattern.exec(content)) !== null) {
+        while ((emojiMatch = tagPattern.exec(content)) !== null) {
             if (emojiMatch.index > lastIndex) {
                 const textBefore = content.slice(lastIndex, emojiMatch.index).trim();
                 if (textBefore) parts.push({ type: 'text', content: textBefore });
             }
-            parts.push({ type: 'emoji', content: emojiMatch[1].trim() });
+            const payload = emojiMatch[2].trim();
+            // 描述是空的就整个丢掉：空 prompt 调生图只会白烧一次额度。
+            if (payload) {
+                parts.push({ type: emojiMatch[1] === 'SEND_IMAGE' ? 'image' : 'emoji', content: payload });
+            }
             lastIndex = emojiMatch.index + emojiMatch[0].length;
         }
 

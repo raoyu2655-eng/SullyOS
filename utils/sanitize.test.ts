@@ -314,6 +314,27 @@ describe('sanitizeIntoSegments', () => {
     ]);
   });
 
+  // 不独立成段的话，`[[SEND_IMAGE:…]]` 会当普通文字走到「剥光 [[...]] 后为空就跳过」
+  // 那条规则上被整段丢掉 —— 角色说要发图、推送里一条都没有。
+  it('SEND_IMAGE 单独成行 → 独立 segment，不被当成空段丢掉', () => {
+    const segs = sanitizeIntoSegments('喏\n[[SEND_IMAGE: 窗台上的猫]]');
+    expect(segs).toEqual([
+      { raw: '喏', sanitized: '喏' },
+      { raw: '[[SEND_IMAGE: 窗台上的猫]]', sanitized: '[图片：窗台上的猫]' },
+    ]);
+  });
+
+  it('长生图描述 → banner 折成 [图片]（锁屏不塞几十字的画面清单）', () => {
+    const long = '深夜的书桌一角，摊开的笔记本上压着半杯冷掉的美式，台灯暖黄侧光，俯拍特写';
+    const segs = sanitizeIntoSegments(`[[SEND_IMAGE: ${long}]]`);
+    expect(segs).toEqual([{ raw: `[[SEND_IMAGE: ${long}]]`, sanitized: '[图片]' }]);
+  });
+
+  it('图和表情混排 → 保持模型写的先后顺序', () => {
+    const segs = sanitizeIntoSegments('[[SEND_IMAGE: 晚饭]]\n[[SEND_EMOJI: 得意]]');
+    expect(segs.map(s => s.sanitized)).toEqual(['[图片：晚饭]', '[表情：得意]']);
+  });
+
   it('inline SEND_EMOJI 在文字中间 → 拆 3 段 (text/emoji/text)', () => {
     const segs = sanitizeIntoSegments('你看 [[SEND_EMOJI: 笑]] 我没事的');
     expect(segs).toEqual([

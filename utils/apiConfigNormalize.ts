@@ -18,6 +18,7 @@ export const normalizeApiModel = (value: unknown): string =>
 
 export function normalizeApiConfig(config: APIConfig): APIConfig {
   const visionApi = config.visionApi;
+  const imageGenApi = config.imageGenApi;
   return {
     ...config,
     baseUrl: normalizeApiBaseUrl(config.baseUrl),
@@ -29,6 +30,17 @@ export function normalizeApiConfig(config: APIConfig): APIConfig {
         baseUrl: normalizeApiBaseUrl(visionApi.baseUrl),
         apiKey: normalizeApiCredential(visionApi.apiKey),
         model: normalizeApiModel(visionApi.model),
+      },
+    } : {}),
+    // 生图 API 的三项跟主 API 一样怕粘贴带进来的零宽字符（Key 里混一个就是 401，
+    // 而且肉眼完全看不出来）。其余字段（尺寸/模板/附加参数）是自由文本，不动。
+    ...(imageGenApi ? {
+      imageGenApi: {
+        ...imageGenApi,
+        enabled: imageGenApi.enabled === true,
+        baseUrl: normalizeApiBaseUrl(imageGenApi.baseUrl),
+        apiKey: normalizeApiCredential(imageGenApi.apiKey),
+        model: normalizeApiModel(imageGenApi.model),
       },
     } : {}),
   };
