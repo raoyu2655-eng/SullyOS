@@ -326,6 +326,19 @@ async function parseImageResponse(
   signal?: AbortSignal,
 ): Promise<GenerateImageResult> {
   const rawText = await res.text();
+
+  // 空响应体单独拎出来说 —— 这是中转站最坑的一种坏法：状态码给 200、后台记一次成功调用、
+  // 钱也扣了，却一个字节都不回。落到通用的「返回的不是 JSON」上，报错尾巴是空的，
+  // 用户只会以为是自己参数填错，然后一遍遍重试、一遍遍扣费。
+  // 这种情况客户端无解（图确实生成了，只是没传回来），只能明说是服务端的问题。
+  if (!rawText.trim()) {
+    throw new Error(
+      `生图接口返回了空响应（HTTP ${res.status}，0 字节）。`
+      + '图很可能已经生成并计费了，只是没传回来——这是中转站那头的问题，换参数或重试都解决不了。'
+      + '建议联系服务商，或换一家中转站。'
+    );
+  }
+
   let data: any;
   try {
     data = JSON.parse(rawText);

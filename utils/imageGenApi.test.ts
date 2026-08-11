@@ -344,6 +344,18 @@ describe('generateImage', () => {
     });
   });
 
+  // 中转站最坑的一种坏法：200 + 0 字节，后台记成功调用、钱照扣，图不给你。
+  // 落到通用的「返回的不是 JSON」上报错尾巴是空的，用户会以为是自己参数填错然后反复重试扣费。
+  it('HTTP 200 但响应体为空 → 明确指出是服务端问题，别让用户以为是自己填错了', async () => {
+    fetchMock.mockResolvedValue({ ok: true, status: 200, text: async () => '' });
+    await expect(generateImage('一只猫', cfg())).rejects.toThrow(/空响应.*已经生成并计费|中转站那头的问题/s);
+  });
+
+  it('只有空白字符的响应体同样算空', async () => {
+    fetchMock.mockResolvedValue({ ok: true, status: 200, text: async () => '  \n ' });
+    await expect(generateImage('一只猫', cfg())).rejects.toThrow(/空响应/);
+  });
+
   it('返回「未知参数」类报错 → 错误信息里带上「去哪儿改」', async () => {
     fetchMock.mockResolvedValue(jsonRes({ error: { message: "Unknown parameter: 'response_format'." } }, false, 400));
     await expect(generateImage('一只猫', cfg())).rejects.toThrow(/高级选项/);
