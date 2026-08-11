@@ -29,6 +29,7 @@ import {
 } from '../../utils/cfProvision';
 import { isAmsgServerVersionAtLeast } from '../../utils/amsgWorkerVersion';
 import { trackEvent } from '../../utils/analytics';
+import { WORKERS_REPO_URL } from '../../utils/workersDeployRepo';
 
 // 满血链路吃满这些 worker 特性（amsg-server 2.6.0-next.4+）。探测不到端点（老部署
 // 404 → null）或缺任何一项，就亮「重新部署」提示——worker 跑在用户自己的账号里，
@@ -100,8 +101,10 @@ const REQUIRED_WORKER_FEATURES = [
 // 不比版本的话，旧粘贴部署会被误判为最新，问题全在 worker 侧静默发生。
 const REQUIRED_WORKER_VERSION = '2.6.0-next.20';
 
-/** 装着打包好的 worker 代码的部署仓库：fork 它 → 在 Cloudflare 连上 → 以后点 Sync fork 更新。 */
-const WORKERS_REPO_URL = 'https://github.com/Tosd0/sullyos-workers';
+/**
+ * 装着打包好的 worker 代码的部署仓库：在 Cloudflare 上连一次 Git，之后更新只要点一下同步。
+ * 地址收口在 utils/workersDeployRepo.ts（本 fork 指向自己的部署仓库，不是上游的）。
+ */
 const SETUP_WALKTHROUGH_URL = 'https://github.com/qegj567-cloud/SullyOS/blob/master/docs/amsg2-setup-walkthrough.md';
 /** 一键部署要的那枚 API Token 在这里建。 */
 const CF_TOKEN_URL = 'https://dash.cloudflare.com/profile/api-tokens';

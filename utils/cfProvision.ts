@@ -14,6 +14,7 @@
 
 import { getProxyWorkerUrl } from './proxyWorker';
 import { generateVapidKeyPair, generateClientToken } from './vapidGen';
+import { AMSG_BUNDLE_BASE } from './workersDeployRepo';
 
 /** 部署出来的 Worker / D1 默认叫这个，跟 worker/amsg/wrangler.toml 对齐。 */
 export const AMSG_SCRIPT_NAME = 'sullyos-amsg';
@@ -22,7 +23,9 @@ export const AMSG_D1_NAME = 'sullyos-amsg';
 /** 上传时的模块名，同时是 metadata.main_module，两处必须一致。 */
 const MAIN_MODULE = 'worker.bundle.js';
 
-const BUNDLE_BASE = 'https://raw.githubusercontent.com/Tosd0/sullyos-workers/main/amsg';
+// 部署仓库地址收口在 utils/workersDeployRepo.ts —— 本 fork 指向自己的部署仓库，
+// 否则一键部署拉回来的是上游成品包，本仓库对 worker 源码的改动全都拿不到。
+const BUNDLE_BASE = AMSG_BUNDLE_BASE;
 const BUNDLE_URL = `${BUNDLE_BASE}/${MAIN_MODULE}`;
 const WRANGLER_URL = `${BUNDLE_BASE}/wrangler.toml`;
 

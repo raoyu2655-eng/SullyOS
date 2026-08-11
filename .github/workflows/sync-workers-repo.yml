@@ -39,8 +39,13 @@ concurrency:
 
 # 部署仓库的 owner/name 全写：它跟本仓库不在同一个账号下，
 # 界面和文档里给用户的 fork 链接指的也是这个地址。
+#
+# 本 fork 同步到自己的部署仓库 —— 必须和 utils/workersDeployRepo.ts 里的
+# WORKERS_DEPLOY_REPO 保持一致：那份常量决定「一键部署 / worker 自更新去哪儿取代码」，
+# 这里决定「新 bundle 推到哪儿」。两边指到不同仓库，就会出现「同步了但部署拿不到」
+# 或者反过来的静默错位。
 env:
-  TARGET_REPO: Tosd0/sullyos-workers
+  TARGET_REPO: raoyu2655-eng/sullyos-workers
 
 jobs:
   sync:

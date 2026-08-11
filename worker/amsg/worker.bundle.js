@@ -7159,9 +7159,19 @@ var handleInstantChat = async (args) => {
   return json(202, { status: "accepted", uuid });
 };
 
+// utils/workersDeployRepo.ts
+var WORKERS_DEPLOY_REPO = "raoyu2655-eng/sullyos-workers";
+var WORKERS_REPO_URL = `https://github.com/${WORKERS_DEPLOY_REPO}`;
+var AMSG_BUNDLE_BASE = `https://raw.githubusercontent.com/${WORKERS_DEPLOY_REPO}/main/amsg`;
+var AMSG_BUNDLE_URL = `${AMSG_BUNDLE_BASE}/worker.bundle.js`;
+
 // worker/amsg/src/selfUpdate.ts
 var CF_API = "https://api.cloudflare.com/client/v4";
-var BUNDLE_URL = "https://raw.githubusercontent.com/Tosd0/sullyos-workers/main/amsg/worker.bundle.js";
+var DEFAULT_BUNDLE_URL = AMSG_BUNDLE_URL;
+function resolveBundleUrl(env) {
+  const raw = typeof env?.AMSG_BUNDLE_URL === "string" ? env.AMSG_BUNDLE_URL.trim() : "";
+  return raw.startsWith("https://") ? raw : DEFAULT_BUNDLE_URL;
+}
 var MAIN_MODULE = "worker.bundle.js";
 var FALLBACK_COMPATIBILITY_DATE = "2026-01-01";
 var FALLBACK_COMPATIBILITY_FLAGS = ["global_fetch_strictly_public"];
@@ -7248,10 +7258,10 @@ async function locateScript(env, token, scriptName) {
     message: `\u5728\u8FD9\u679A token \u80FD\u78B0\u5230\u7684 ${accounts.length} \u4E2A\u8D26\u53F7\u91CC\u90FD\u6CA1\u627E\u5230\u540D\u4E3A ${scriptName} \u7684 Worker\u3002\u8981\u4E48 token \u7684\u6743\u9650\u6CA1\u8986\u76D6\u5230\u5B83\u6240\u5728\u7684\u8D26\u53F7\uFF0C\u8981\u4E48 Worker \u540D\u5B57\u5BF9\u4E0D\u4E0A\uFF08\u53EF\u7528 CF_SCRIPT_NAME \u6307\u5B9A\uFF09\u3002`
   };
 }
-async function fetchLatestBundle() {
+async function fetchLatestBundle(bundleUrl) {
   let res;
   try {
-    res = await fetch(BUNDLE_URL, { headers: { "User-Agent": "sullyos-amsg-self-update" } });
+    res = await fetch(bundleUrl, { headers: { "User-Agent": "sullyos-amsg-self-update" } });
   } catch (err5) {
     return { ok: false, message: `\u53D6\u4E0D\u5230\u6700\u65B0\u4EE3\u7801\uFF1A${err5.message}` };
   }
@@ -7331,7 +7341,7 @@ async function handleSelfUpdate(request, env) {
   if (!located.ok) return fail("SCRIPT_NOT_LOCATED", located.message);
   const account = { id: located.accountId };
   const settings = { result: located.settings };
-  const bundle = await fetchLatestBundle();
+  const bundle = await fetchLatestBundle(resolveBundleUrl(env));
   if (!bundle.ok) return fail("BUNDLE_INVALID", bundle.message);
   const rebuilt = rebuildBindings(
     settings.result?.bindings ?? [],

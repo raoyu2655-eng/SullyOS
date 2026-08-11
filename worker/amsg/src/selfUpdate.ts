@@ -18,12 +18,27 @@
  */
 
 import { constantTimeEqual } from './instantChat';
+import { AMSG_BUNDLE_URL } from '../../../utils/workersDeployRepo';
 
 const CF_API = 'https://api.cloudflare.com/client/v4';
 
-/** 官方成品代码。跟代配脚本、手册附录指的是同一份。 */
-const BUNDLE_URL =
-  'https://raw.githubusercontent.com/Tosd0/sullyos-workers/main/amsg/worker.bundle.js';
+/**
+ * 成品代码的默认地址。跟代配脚本、手册附录指的是同一份。
+ *
+ * 地址收口在 utils/workersDeployRepo.ts —— 本 fork 指向自己的部署仓库。
+ * 指错的后果是静默的：自更新照常「成功」，只是把 worker 刷成了别人的版本，
+ * 本仓库对 worker 源码的改动全部丢失。
+ */
+const DEFAULT_BUNDLE_URL = AMSG_BUNDLE_URL;
+
+/**
+ * 环境变量 `AMSG_BUNDLE_URL` 可以覆盖它 —— 换部署仓库时连重新打包都不用，
+ * 在 Cloudflare 面板加个变量就行。只认 https，免得被改成 http 明文源。
+ */
+function resolveBundleUrl(env: Record<string, unknown>): string {
+  const raw = typeof env?.AMSG_BUNDLE_URL === 'string' ? env.AMSG_BUNDLE_URL.trim() : '';
+  return raw.startsWith('https://') ? raw : DEFAULT_BUNDLE_URL;
+}
 
 /** 上传时用的模块名，同时也是 metadata.main_module，两处必须一致。 */
 const MAIN_MODULE = 'worker.bundle.js';
@@ -191,12 +206,12 @@ async function locateScript(
 }
 
 /** 取回最新成品包，并确认它确实是 amsg 的 worker 而不是一张错误页。 */
-async function fetchLatestBundle(): Promise<
+async function fetchLatestBundle(bundleUrl: string): Promise<
   { ok: true; code: string } | { ok: false; message: string }
 > {
   let res: Response;
   try {
-    res = await fetch(BUNDLE_URL, { headers: { 'User-Agent': 'sullyos-amsg-self-update' } });
+    res = await fetch(bundleUrl, { headers: { 'User-Agent': 'sullyos-amsg-self-update' } });
   } catch (err) {
     return { ok: false, message: `取不到最新代码：${(err as Error).message}` };
   }
@@ -333,7 +348,7 @@ export async function handleSelfUpdate(
   const settings = { result: located.settings };
 
   // ③ 新代码先拿到手并验明正身，再碰线上的东西。
-  const bundle = await fetchLatestBundle();
+  const bundle = await fetchLatestBundle(resolveBundleUrl(env as unknown as Record<string, unknown>));
   if (!bundle.ok) return fail('BUNDLE_INVALID', bundle.message);
 
   // 密钥的名字要到运行时才知道（读回来的 binding 列表说了算），所以这里按名取值，
