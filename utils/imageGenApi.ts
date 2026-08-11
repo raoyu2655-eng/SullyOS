@@ -16,8 +16,19 @@
  */
 import type { APIConfig, ImageGenApiConfig } from '../types';
 
-/** 生图默认超时：文生图普遍比对话慢得多，SD 类服务冷启动几十秒是常态。 */
-const DEFAULT_TIMEOUT_MS = 120_000;
+/**
+ * 生图默认超时 —— 5 分钟。
+ *
+ * 定这么长是因为「超时太短」的代价比「等太久」大得多：那次生成在服务端照样跑完、
+ * 照样计费，只是结果被我们自己扔了。gpt-image 高质量出图到 2-3 分钟是常事。
+ *
+ * 但也不能不设：生图是串在角色回复流程里的（applyAssistantPostProcessing 的
+ * sendImageBubble 等着它），Promise 永远不落地就意味着不抛错、不落降级气泡、
+ * 界面永远停在「正在自拍…」——退化成彻底的静默失败，比一句「等了 5 分钟没回应」糟得多。
+ *
+ * 用户可在「设置 → 生图 API → 高级选项」里按自己的服务商调。
+ */
+const DEFAULT_TIMEOUT_MS = 300_000;
 
 /** 常用尺寸预设（设置页下拉用）。用户也可以手填任意 WxH。 */
 export const IMAGE_SIZE_PRESETS: { value: string; label: string }[] = [
@@ -43,6 +54,11 @@ export const DEFAULT_IMAGE_GEN_CONFIG: ImageGenApiConfig = {
   timeoutMs: DEFAULT_TIMEOUT_MS,
   saveToGallery: true,
 };
+
+/** 超时输入框的可选范围（秒）。低于 30 秒基本必然误杀，高于 15 分钟等于没有。 */
+export const IMAGE_TIMEOUT_MIN_S = 30;
+export const IMAGE_TIMEOUT_MAX_S = 900;
+export const IMAGE_TIMEOUT_DEFAULT_S = DEFAULT_TIMEOUT_MS / 1000;
 
 /** 三个必填项齐了 + 开关打开才算「能用」。少一项都当没配。 */
 export const isImageGenConfigured = (cfg?: ImageGenApiConfig | null): boolean =>
@@ -288,8 +304,10 @@ export async function generateImage(
   // 用户传进来的 signal 和超时定时器合并成一个：任一触发都要真的中止请求。
   const timeoutMs = cfg.timeoutMs && cfg.timeoutMs > 0 ? cfg.timeoutMs : DEFAULT_TIMEOUT_MS;
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  const onOuterAbort = () => controller.abort();
+  // abort 一定要带 reason —— 不带的话浏览器只报「signal is aborted without reason」，
+  // App 的网络诊断会把它读成「用户手动点了停止」，把排查方向直接带偏。
+  const timer = setTimeout(() => controller.abort(timeoutReason(timeoutMs, '生图')), timeoutMs);
+  const onOuterAbort = () => controller.abort(options.signal?.reason);
   options.signal?.addEventListener('abort', onOuterAbort, { once: true });
 
   let res: Response;
@@ -304,8 +322,15 @@ export async function generateImage(
       signal: controller.signal,
     });
   } catch (e: any) {
+    // 调用方自己撤的（切页面 / 组件卸载）——原样抛，不要伪装成超时。
     if (options.signal?.aborted) throw e;
-    if (e?.name === 'AbortError') throw new Error(`生图超时（>${Math.round(timeoutMs / 1000)} 秒）`);
+    // 我们自己的超时。abort 带了 reason 后错误名是 TimeoutError；不带 reason 的老路径是 AbortError，一并认。
+    if (e?.name === 'TimeoutError' || e?.name === 'AbortError') {
+      throw new Error(
+        `生图超时：等了 ${Math.round(timeoutMs / 1000)} 秒服务端一个字节都没回，由客户端中止。`
+        + '（不是你点了停止。这种形态多半是中转站那头卡住了——图可能已经生成并计费。换一家中转站试试。）'
+      );
+    }
     throw new Error(`连不上生图接口：${e?.message || e}`);
   } finally {
     clearTimeout(timer);
@@ -386,6 +411,16 @@ async function parseImageResponse(
   throw new Error(`生图接口没返回图片数据：${rawText.slice(0, 200)}`);
 }
 
+/**
+ * 超时中止时带上的 reason。
+ *
+ * `controller.abort()` 不带参数时，浏览器给的是「signal is aborted without reason」——
+ * App 的网络诊断只能把它归类成「调用方自己撤了 / 用户点了停止」，于是排查方向被带去
+ * 「是不是切页面了」，而真相是这次请求挂满了超时上限。带上 reason 就能直接看出是谁掐的。
+ */
+const timeoutReason = (ms: number, what: string): DOMException =>
+  new DOMException(`${what}超时：等了 ${Math.round(ms / 1000)} 秒仍未收到响应，由客户端主动中止`, 'TimeoutError');
+
 /** 服务商没代理 /images/edits 时抛这个，调用方据此回落到纯文字生图。 */
 export class ReferenceUnsupportedError extends Error {
   constructor(message: string) {
@@ -427,8 +462,8 @@ async function generateWithReference(args: {
   // 手写会漏掉 boundary，服务端直接解析失败。
   const timeoutMs = cfg.timeoutMs && cfg.timeoutMs > 0 ? cfg.timeoutMs : DEFAULT_TIMEOUT_MS;
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  const onOuterAbort = () => controller.abort();
+  const timer = setTimeout(() => controller.abort(timeoutReason(timeoutMs, '锁脸生图')), timeoutMs);
+  const onOuterAbort = () => controller.abort(signal?.reason);
   signal?.addEventListener('abort', onOuterAbort, { once: true });
 
   let res: Response;
@@ -441,7 +476,10 @@ async function generateWithReference(args: {
     });
   } catch (e: any) {
     if (signal?.aborted) throw e;
-    if (e?.name === 'AbortError') throw new Error(`锁脸生图超时（>${Math.round(timeoutMs / 1000)} 秒）`);
+    // 超时不能算「不支持参考图」——那会让调用方安静回落，把一个链路故障掩盖成功能缺失。
+    if (e?.name === 'TimeoutError' || e?.name === 'AbortError') {
+      throw new Error(`锁脸生图超时：等了 ${Math.round(timeoutMs / 1000)} 秒服务端没有响应（不是你点了停止）。`);
+    }
     throw new ReferenceUnsupportedError(`连不上 /images/edits：${e?.message || e}`);
   } finally {
     clearTimeout(timer);

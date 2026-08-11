@@ -42,7 +42,7 @@ import {
 } from '../utils/avatarModelBackup';
 import { normalizeApiBaseUrl, normalizeApiCredential, normalizeApiModel } from '../utils/apiConfigNormalize';
 import { describeImageWithVisionApi, VISION_API_TEST_IMAGE_DATA_URL, visionApiConfigFromPreset } from '../utils/visionApi';
-import { generateImage, probeReferenceSupport, IMAGE_SIZE_PRESETS } from '../utils/imageGenApi';
+import { generateImage, probeReferenceSupport, IMAGE_SIZE_PRESETS, IMAGE_TIMEOUT_MIN_S, IMAGE_TIMEOUT_MAX_S, IMAGE_TIMEOUT_DEFAULT_S } from '../utils/imageGenApi';
 import type { ImageGenApiConfig } from '../types';
 
 // hot_news（news.orz.ai）可选热榜平台。key 必须与 API 的 ?platform= 完全一致。
@@ -490,6 +490,9 @@ const Settings: React.FC = () => {
   const [localImgGenFormat, setLocalImgGenFormat] = useState<'b64_json' | 'url' | 'auto'>(apiConfig.imageGenApi?.responseFormat ?? 'b64_json');
   const [localImgGenExtra, setLocalImgGenExtra] = useState(apiConfig.imageGenApi?.extraBody || '');
   const [localImgGenGallery, setLocalImgGenGallery] = useState(apiConfig.imageGenApi?.saveToGallery ?? true);
+  const [localImgGenTimeoutS, setLocalImgGenTimeoutS] = useState(
+    String(Math.round((apiConfig.imageGenApi?.timeoutMs ?? IMAGE_TIMEOUT_DEFAULT_S * 1000) / 1000)),
+  );
   const [showImgGenAdvanced, setShowImgGenAdvanced] = useState(false);
   const [imgGenStatusMsg, setImgGenStatusMsg] = useState('');
   const [testingImgGen, setTestingImgGen] = useState(false);
@@ -859,6 +862,7 @@ const Settings: React.FC = () => {
       setLocalImgGenFormat(apiConfig.imageGenApi?.responseFormat ?? 'b64_json');
       setLocalImgGenExtra(apiConfig.imageGenApi?.extraBody || '');
       setLocalImgGenGallery(apiConfig.imageGenApi?.saveToGallery ?? true);
+      setLocalImgGenTimeoutS(String(Math.round((apiConfig.imageGenApi?.timeoutMs ?? IMAGE_TIMEOUT_DEFAULT_S * 1000) / 1000)));
       setLocalTtsProvider(apiConfig.ttsProvider === 'fishaudio' ? 'fishaudio' : 'minimax');
       setLocalFishKey(apiConfig.fishAudioApiKey || '');
       setLocalFishModel(apiConfig.fishAudioModel || 's2.1-pro');
@@ -1089,6 +1093,12 @@ const Settings: React.FC = () => {
     responseFormat: localImgGenFormat,
     extraBody: localImgGenExtra.trim(),
     saveToGallery: localImgGenGallery,
+    // 空 / 非法 → 交给 imageGenApi 用它的默认值，别在这里硬塞一个数字。
+    timeoutMs: (() => {
+      const n = Number(localImgGenTimeoutS);
+      if (!Number.isFinite(n) || n <= 0) return undefined;
+      return Math.min(Math.max(Math.round(n), IMAGE_TIMEOUT_MIN_S), IMAGE_TIMEOUT_MAX_S) * 1000;
+    })(),
   });
 
   const handleSaveImageGenApi = () => {
@@ -2875,6 +2885,21 @@ const Settings: React.FC = () => {
                                     className="w-full bg-white/60 border border-slate-200/60 rounded-xl px-3 py-2.5 text-xs font-mono leading-relaxed focus:bg-white transition-all resize-y disabled:cursor-not-allowed"
                                 />
                                 <p className="text-[9px] text-slate-300 mt-1 pl-1">合并进请求体，同名字段覆盖上面的设置。给服务商的私有参数用。</p>
+                            </div>
+                            <div>
+                                <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1.5 block pl-1">超时（秒）</label>
+                                <input
+                                    type="number"
+                                    value={localImgGenTimeoutS}
+                                    onChange={e => setLocalImgGenTimeoutS(e.target.value)}
+                                    disabled={!localImgGenEnabled}
+                                    placeholder={String(IMAGE_TIMEOUT_DEFAULT_S)}
+                                    className="w-full bg-white/60 border border-slate-200/60 rounded-xl px-4 py-2.5 text-sm font-mono focus:bg-white transition-all disabled:cursor-not-allowed"
+                                />
+                                <p className="text-[9px] text-slate-300 mt-1 pl-1 leading-relaxed">
+                                    默认 {IMAGE_TIMEOUT_DEFAULT_S} 秒（{IMAGE_TIMEOUT_DEFAULT_S / 60} 分钟）。gpt-image 高质量出图能到 2-3 分钟，调太短会**误杀本来能成功的请求**——
+                                    而那次生成在服务端照样跑完、照样扣费。范围 {IMAGE_TIMEOUT_MIN_S}-{IMAGE_TIMEOUT_MAX_S} 秒。
+                                </p>
                             </div>
                             <label className="flex items-center justify-between gap-3 pl-1">
                                 <span className="text-[11px] text-slate-500 font-medium">生成的图存进相册</span>

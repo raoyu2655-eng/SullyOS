@@ -346,6 +346,28 @@ describe('generateImage', () => {
 
   // 中转站最坑的一种坏法：200 + 0 字节，后台记成功调用、钱照扣，图不给你。
   // 落到通用的「返回的不是 JSON」上报错尾巴是空的，用户会以为是自己参数填错然后反复重试扣费。
+  // 超时中止必须自报家门。不带 reason 的话浏览器只说「aborted without reason」，
+  // App 的网络诊断会归类成「用户点了停止」，排查方向直接被带去「是不是切页面了」。
+  it('自己的超时 → 说清是客户端中止、不是用户点了停止', async () => {
+    fetchMock.mockImplementation((_u: string, init: any) => new Promise((_res, rej) => {
+      init.signal.addEventListener('abort', () => rej(init.signal.reason), { once: true });
+    }));
+    const err = await generateImage('一只猫', cfg({ timeoutMs: 30 })).catch(e => e);
+    expect(err.message).toMatch(/超时/);
+    expect(err.message).toMatch(/不是你点了停止/);
+  });
+
+  it('调用方自己撤的 → 原样抛，不伪装成超时', async () => {
+    const outer = new AbortController();
+    fetchMock.mockImplementation((_u: string, init: any) => new Promise((_res, rej) => {
+      init.signal.addEventListener('abort', () => rej(init.signal.reason ?? new DOMException('aborted', 'AbortError')), { once: true });
+    }));
+    const p = generateImage('一只猫', cfg(), { signal: outer.signal }).catch(e => e);
+    outer.abort(new DOMException('用户切走了页面', 'AbortError'));
+    const err = await p;
+    expect(err.message).not.toMatch(/超时/);
+  });
+
   it('HTTP 200 但响应体为空 → 明确指出是服务端问题，别让用户以为是自己填错了', async () => {
     fetchMock.mockResolvedValue({ ok: true, status: 200, text: async () => '' });
     await expect(generateImage('一只猫', cfg())).rejects.toThrow(/空响应.*已经生成并计费|中转站那头的问题/s);
