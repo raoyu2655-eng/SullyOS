@@ -61,7 +61,7 @@ import { loadMusicPlaybackSnapshot } from './MusicContext';
 import { setCharNameRegistry } from '../utils/charNameRegistry';
 import { setMinimaxRegion } from '../utils/minimaxEndpoint';
 import { setTtsProvider, setVoicePromptOverrides } from '../utils/ttsProvider';
-import { generateImage, getImageGenConfig, isImageGenConfigured, setImageGenConfig } from '../utils/imageGenApi';
+import { buildSelfiePrompt, generateImage, getImageGenConfig, isImageGenConfigured, setImageGenConfig } from '../utils/imageGenApi';
 import { LocalNotifications } from '@capacitor/local-notifications';
 import { Capacitor } from '@capacitor/core';
 import { formatBytes } from '../utils/format';
@@ -2376,11 +2376,18 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
                   // 一律降级成 `[图片：描述]` 文字气泡，绝不静默丢 —— 主动消息把每个标签切成独立
                   // 一条推送，丢一条就是「横幅响了、点进去没有」。
                   // 双语和普通两条分支共用它，所以定义在这一层。
-                  const sendImageBubble = async (description: string): Promise<void> => {
+                  const sendImageBubble = async (description: string, isSelfie = false): Promise<void> => {
                       const imgCfg = getImageGenConfig();
                       const meta = consumeThinkingMeta();
+                      // 与 applyAssistantPostProcessing.sendImageBubble 同款：自拍的外貌由角色
+                      // 档案里那段固定文本负责，模型只写场景；没填外貌就退化成普通生图。
+                      const appearance = (char.imageGen?.appearance || '').trim();
+                      const asSelfie = isSelfie && !!appearance;
+                      const imgPrompt = asSelfie ? buildSelfiePrompt(appearance, description) : description;
+                      const imgSeed = char.imageGen?.seed;
+                      const label = isSelfie ? '自拍' : '图片';
                       const saveFallback = async (note: string) => {
-                          const fallbackText = `[图片：${description}]`;
+                          const fallbackText = `[${label}：${description || '自拍'}]`;
                           await DB.saveMessage({
                               charId,
                               role: 'assistant',
@@ -2393,12 +2400,14 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
                           offset += 1;
                       };
                       if (!isImageGenConfigured(imgCfg)) {
-                          console.warn('[ImageGen/Proactive] 角色写了 [[SEND_IMAGE]] 但生图 API 没配', { charId, description });
+                          console.warn('[ImageGen/Proactive] 角色写了生图标签但生图 API 没配', { charId, description, isSelfie });
                           await saveFallback('未配置生图 API');
                           return;
                       }
                       try {
-                          const result = await generateImage(description, imgCfg!);
+                          const result = await generateImage(imgPrompt, imgCfg!, {
+                              ...(asSelfie && typeof imgSeed === 'number' ? { seed: imgSeed } : {}),
+                          });
                           await DB.saveMessage({
                               charId,
                               role: 'assistant',
@@ -2413,11 +2422,13 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
                                       revisedPrompt: result.revisedPrompt,
                                       model: imgCfg!.model,
                                       size: imgCfg!.size,
+                                      selfie: asSelfie || undefined,
+                                      seed: asSelfie && typeof imgSeed === 'number' ? imgSeed : undefined,
                                       remote: result.isRemoteUrl || undefined,
                                   },
                               },
                           } as any);
-                          savedPreviewChunks.push('[图片]');
+                          savedPreviewChunks.push(`[${label}]`);
                           offset += 1;
                       } catch (e: any) {
                           console.error('[ImageGen/Proactive] 生图失败:', e?.message || e);
@@ -2451,7 +2462,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
                                   continue;
                               }
                               if (part.type === 'image') {
-                                  await sendImageBubble(part.content);
+                                  await sendImageBubble(part.content, part.selfie);
                                   continue;
                               }
                               const cleaned = ChatParser.sanitize(part.content);
@@ -2543,7 +2554,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
                           }
 
                           if (part.type === 'image') {
-                              await sendImageBubble(part.content);
+                              await sendImageBubble(part.content, part.selfie);
                               continue;
                           }
 

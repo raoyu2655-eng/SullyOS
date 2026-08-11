@@ -2707,6 +2707,13 @@ const Settings: React.FC = () => {
                             className="w-full bg-white/60 border border-slate-200/60 rounded-xl px-4 py-2.5 text-sm font-mono focus:bg-white transition-all disabled:cursor-not-allowed"
                         />
                         <p className="text-[9px] text-slate-300 mt-1 pl-1">不同模型支持的尺寸不一样，填了不支持的值会报错——报错就换一个预设试试。</p>
+                        {/* gpt-image 系只认三种尺寸，选错就是一次 400。别让用户对着报错猜。 */}
+                        {/gpt-image/i.test(localImgGenModel) && !['1024x1024', '1024x1536', '1536x1024', 'auto', ''].includes(localImgGenSize.trim()) && (
+                            <p className="text-[10px] text-amber-600 bg-amber-50 rounded-lg px-2.5 py-1.5 mt-1.5 leading-relaxed">
+                                ⚠️ gpt-image 系只支持 <span className="font-mono">1024x1024</span> / <span className="font-mono">1024x1536</span> / <span className="font-mono">1536x1024</span>，
+                                当前这个尺寸会被拒绝。
+                            </p>
+                        )}
                     </div>
 
                     <div>

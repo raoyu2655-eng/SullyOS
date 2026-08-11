@@ -584,12 +584,15 @@ export function sanitizeIntoSegments(text: string): Segment[] {
         continue;
       }
       if (part.kind === 'image') {
-        // banner 上只写「图片」这一层意思: 生图描述是写给模型看的画面清单
+        // banner 上只写「图片 / 自拍」这一层意思: 生图描述是写给模型看的画面清单
         // (主体+光线+构图, 常有几十字英文), 原样塞进锁屏通知既挤爆一行也没人想读。
-        // 短描述留着当提示, 长的直接折成 [图片]。
-        const brief = part.description.length <= 12 ? `[图片：${part.description}]` : '[图片]';
+        // 短描述留着当提示, 长的直接折成 [图片] / [自拍]。
+        const label = part.selfie ? '自拍' : '图片';
+        const brief = part.description && part.description.length <= 12
+          ? `[${label}：${part.description}]`
+          : `[${label}]`;
         segments.push({
-          raw: `[[SEND_IMAGE: ${part.description}]]`,
+          raw: `[[${part.selfie ? 'SEND_SELFIE' : 'SEND_IMAGE'}: ${part.description}]]`,
           sanitized: brief,
         });
         continue;
@@ -697,15 +700,15 @@ function chunkText(text: string): string[] {
 function splitOnSendEmoji(chunk: string): Array<
   | { kind: 'text'; text: string }
   | { kind: 'emoji'; name: string }
-  | { kind: 'image'; description: string }
+  | { kind: 'image'; description: string; selfie?: boolean }
 > {
   // `[^\[\]]*?` 与 chatParser.splitResponse 同口径: 允许换行 (生图描述常写得长),
   // 但不许跨过方括号 —— 漏写闭合的标签不该把后面的正文和标签一起吞掉。
-  const re = /\[\[(SEND_EMOJI|SEND_IMAGE)[:：]\s*([^\[\]]*?)\]\]/g;
+  const re = /\[\[(SEND_EMOJI|SEND_IMAGE|SEND_SELFIE)[:：]\s*([^\[\]]*?)\]\]/g;
   const parts: Array<
     | { kind: 'text'; text: string }
     | { kind: 'emoji'; name: string }
-    | { kind: 'image'; description: string }
+    | { kind: 'image'; description: string; selfie?: boolean }
   > = [];
   let lastIndex = 0;
   let m: RegExpExecArray | null;
@@ -715,10 +718,11 @@ function splitOnSendEmoji(chunk: string): Array<
     }
     const payload = m[2].trim();
     // 空 payload 整个丢掉 (客户端同口径): 空表情名配不上图库, 空描述调生图只会白烧额度。
-    if (payload) {
-      parts.push(m[1] === 'SEND_IMAGE'
-        ? { kind: 'image', description: payload }
-        : { kind: 'emoji', name: payload });
+    // 自拍是例外 —— 外貌由客户端拼角色档案里那段固定文本, 场景空着照样能出一张纯人像。
+    if (payload || m[1] === 'SEND_SELFIE') {
+      if (m[1] === 'SEND_SELFIE') parts.push({ kind: 'image', description: payload, selfie: true });
+      else if (m[1] === 'SEND_IMAGE') parts.push({ kind: 'image', description: payload });
+      else parts.push({ kind: 'emoji', name: payload });
     }
     lastIndex = m.index + m[0].length;
   }

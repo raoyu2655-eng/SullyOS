@@ -2692,6 +2692,26 @@ export interface CharacterProfile {
   description: string;
   systemPrompt: string;
   worldview?: string;
+  /**
+   * 生图 · 自拍设定（见 utils/imageGenApi.ts）。
+   *
+   * 角色写 `[[SEND_SELFIE: 场景/动作/表情]]` 时，代码把 `appearance` 原样拼在
+   * 场景描述前面送进生图模型 —— **外貌由这段固定文本负责，不让模型每次现编**。
+   * 生图 API 是无状态的：同一个人设让模型自由发挥，这次画出银发少女、下次就是
+   * 黑发御姐，十张自拍十个人，比不发自拍更破坏沉浸感。
+   *
+   * 即便如此也只能做到「像同一个人」，做不到「就是同一个人」——真正的角色一致性
+   * 要 LoRA 或 img2img 参考图，不是这一层能解决的。
+   */
+  imageGen?: {
+    /** 固定外貌描述，生图专用。空 → 角色不发自拍（提示词里不教 SEND_SELFIE）。 */
+    appearance?: string;
+    /**
+     * 固定随机种子。同 seed + 同提示词 → 输出高度接近。
+     * SD 系（Flux / Kolors / 各中转站）认它；DALL·E 3 不认，填了也没用。
+     */
+    seed?: number;
+  };
   /** 角色分组：指向 CharacterGroup.id；空或指向已删分组 = 未分组。仅本地组织用，不随角色卡导出 */
   groupId?: string;
   memories: MemoryFragment[];

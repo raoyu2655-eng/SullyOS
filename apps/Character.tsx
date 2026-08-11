@@ -1384,6 +1384,67 @@ ${isInitialGeneration ? `
                                 />
                            </div>
 
+                           {/* 生图 · 自拍设定：填了才会在提示词里教角色 [[SEND_SELFIE]]（见 utils/chatPrompts.ts selfieEnabled）。
+                               外貌由这段固定文本负责，不让模型每次现编——否则同一个角色十张自拍十张脸。 */}
+                           <div className="bg-white rounded-3xl p-4 shadow-sm border border-slate-100 space-y-3">
+                               <div>
+                                   <label className="text-[10px] font-bold text-pink-500 uppercase tracking-widest block">生图 · 自拍设定</label>
+                                   <p className="text-[11px] text-slate-400 mt-1 leading-relaxed">
+                                       填了下面的外貌，角色就能在聊天里发自拍。需要先在「设置 → 生图 API」里配好生图接口。
+                                   </p>
+                               </div>
+
+                               <div className="border-t border-slate-100 pt-3">
+                                   <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1.5 block">生图外貌（自拍长什么样）</label>
+                                   <textarea
+                                       value={formData.imageGen?.appearance || ''}
+                                       onChange={(e) => handleChange('imageGen', { ...(formData.imageGen || {}), appearance: e.target.value })}
+                                       className="w-full h-24 bg-slate-50 rounded-2xl p-4 text-sm shadow-sm resize-none focus:ring-1 focus:ring-pink-200 transition-all vr-reader-scroll"
+                                       placeholder="1girl, 银色长发, 齐刘海, 红色瞳孔, 黑色卫衣, 20岁左右, 日系插画风格"
+                                   />
+                                   <p className="text-[10px] text-slate-400 mt-1.5 leading-relaxed">
+                                       <span className="font-semibold text-slate-500">只写长相和常穿的衣服</span>，别写场景动作（那些由角色每次自己写）。
+                                       写法照抄生图模型的习惯：短词组、逗号分隔，中英文都行。
+                                       <span className="text-slate-500">留空 = 这个角色不发自拍。</span>
+                                   </p>
+                               </div>
+
+                               <div className="border-t border-slate-100 pt-3">
+                                   <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1.5 block">固定种子 Seed（可选）</label>
+                                   <div className="flex gap-2">
+                                       <input
+                                           type="number"
+                                           value={formData.imageGen?.seed ?? ''}
+                                           onChange={(e) => {
+                                               const raw = e.target.value.trim();
+                                               const n = raw === '' ? undefined : Number(raw);
+                                               handleChange('imageGen', {
+                                                   ...(formData.imageGen || {}),
+                                                   seed: (n === undefined || !Number.isFinite(n)) ? undefined : n,
+                                               });
+                                           }}
+                                           placeholder="留空 = 每次随机"
+                                           className="flex-1 min-w-0 px-4 py-2.5 rounded-2xl bg-slate-50 text-sm shadow-sm outline-none focus:ring-1 focus:ring-pink-200"
+                                       />
+                                       <button
+                                           type="button"
+                                           onClick={() => handleChange('imageGen', {
+                                               ...(formData.imageGen || {}),
+                                               seed: Math.floor(Math.random() * 2147483647),
+                                           })}
+                                           className="px-4 py-2.5 rounded-2xl bg-pink-50 text-pink-600 text-xs font-bold shrink-0 active:scale-95 transition-transform"
+                                       >
+                                           随机一个
+                                       </button>
+                                   </div>
+                                   <p className="text-[10px] text-slate-400 mt-1.5 leading-relaxed">
+                                       固定它能让每张自拍长得更像同一个人。
+                                       <span className="text-slate-500">Flux / Kolors 这类 SD 系模型认它；DALL·E 3 不认，填了也没用。</span>
+                                       出的图不满意就点「随机一个」换张脸。
+                                   </p>
+                               </div>
+                           </div>
+
                            {/* 时间感知 & 时区：三个独立开关，可任意组合（聊天时间感知 / 自定义时区 / 线下时间感知） */}
                            <div className="bg-white rounded-3xl p-4 shadow-sm border border-slate-100 space-y-4">
                                <div>

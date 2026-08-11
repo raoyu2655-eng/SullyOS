@@ -49,7 +49,7 @@ import {
 } from './agenticTools';
 import { getLocalDateKey } from './localDate';
 import { normalizeAssistantActionFormatting } from './assistantActionFormat';
-import { generateImage, getImageGenConfig, isImageGenConfigured } from './imageGenApi';
+import { buildSelfiePrompt, generateImage, getImageGenConfig, isImageGenConfigured } from './imageGenApi';
 
 // ─── 模块内辅助 ──────────────────────────────────────────────────────────────
 
@@ -584,26 +584,39 @@ export async function applyAssistantPostProcessing(
         // 2. 生图动辄十几秒，中间要让用户看见「在画了」，否则界面就是一段没有解释的干等。
         // 3. 失败原因要说人话并留在气泡里。生图最常见的失败是余额不足 / 模型名写错，
         //    只 console.warn 的话用户只会觉得「角色说要发图但没发」。
-        const sendImageBubble = async (description: string): Promise<void> => {
+        const sendImageBubble = async (description: string, isSelfie = false): Promise<void> => {
             const cfg = getImageGenConfig();
+            // 自拍：外貌由角色档案里那段固定文本负责，模型只写场景/动作/表情。
+            // 没填外貌就退化成普通生图 —— 提示词那边本来就不会教没填外貌的角色发自拍，
+            // 走到这里说明模型自己编了个标签，照普通照片处理比整条丢掉强。
+            const appearance = (char.imageGen?.appearance || '').trim();
+            const asSelfie = isSelfie && !!appearance;
+            const prompt = asSelfie ? buildSelfiePrompt(appearance, description) : description;
+            const seed = char.imageGen?.seed;
+            const label = isSelfie ? '自拍' : '图片';
+
             const fallbackToText = async (note: string) => {
                 await persistMessage({
                     charId: char.id, role: 'assistant', type: 'text',
-                    content: `[图片：${description}]`,
+                    content: `[${label}：${description || '自拍'}]`,
                     metadata: takeMeta({ ...(mcdInheritMeta || {}), imageGenFailed: note }),
                 } as any);
                 setMessages(await DB.getRecentMessagesByCharId(char.id, 200));
             };
 
             if (!isImageGenConfigured(cfg)) {
-                console.warn('[ImageGen] 角色写了 [[SEND_IMAGE]] 但生图 API 没配，降级成文字气泡', { charId: char.id, description });
+                console.warn('[ImageGen] 角色写了生图标签但生图 API 没配，降级成文字气泡', { charId: char.id, description, isSelfie });
                 await fallbackToText('未配置生图 API');
                 return;
             }
 
-            addToast(`${char.name} 正在画图...`, 'info');
+            addToast(isSelfie ? `${char.name} 正在自拍...` : `${char.name} 正在画图...`, 'info');
             try {
-                const result = await generateImage(description, cfg!);
+                const result = await generateImage(prompt, cfg!, {
+                    // 固定种子只给自拍用：普通照片每张都该长得不一样，锁了种子
+                    // 会让「今天的晚饭」和「路上的猫」画出诡异雷同的构图。
+                    ...(asSelfie && typeof seed === 'number' ? { seed } : {}),
+                });
                 await persistMessage({
                     charId: char.id, role: 'assistant', type: 'image',
                     content: result.content,
@@ -615,6 +628,8 @@ export async function applyAssistantPostProcessing(
                             revisedPrompt: result.revisedPrompt,
                             model: cfg!.model,
                             size: cfg!.size,
+                            selfie: asSelfie || undefined,
+                            seed: asSelfie && typeof seed === 'number' ? seed : undefined,
                             // 存链接（抓不回来时的兜底）的图会过期，标出来方便日后排查裂图。
                             remote: result.isRemoteUrl || undefined,
                         },
@@ -632,7 +647,7 @@ export async function applyAssistantPostProcessing(
                             url: result.content,
                             timestamp: messageTimestamp ?? Date.now(),
                             savedDate: getLocalDateKey(new Date(messageTimestamp ?? Date.now())),
-                            chatContext: [`${char.name} 画的：${description}`],
+                            chatContext: [asSelfie ? `${char.name} 的自拍：${description || '（纯人像）'}` : `${char.name} 画的：${description}`],
                         });
                     } catch (e) {
                         console.warn('[ImageGen] 存相册失败（图片本身已发出）:', e);
@@ -702,7 +717,7 @@ export async function applyAssistantPostProcessing(
                         continue;
                     }
                     if (part.type === 'image') {
-                        await sendImageBubble(part.content);
+                        await sendImageBubble(part.content, part.selfie);
                         continue;
                     }
                     const cleaned = ChatParser.sanitize(part.content);
@@ -762,7 +777,7 @@ export async function applyAssistantPostProcessing(
                 if (part.type === 'emoji') {
                     await sendEmojiBubble(part.content);
                 } else if (part.type === 'image') {
-                    await sendImageBubble(part.content);
+                    await sendImageBubble(part.content, part.selfie);
                 } else {
                     const rawBlocks = part.content.split(/^\s*---\s*$/m).filter(b => b.trim());
                     const allChunks: string[] = [];

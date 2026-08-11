@@ -49,6 +49,20 @@ export const isImageGenConfigured = (cfg?: ImageGenApiConfig | null): boolean =>
   !!(cfg?.enabled && cfg.baseUrl?.trim() && cfg.apiKey?.trim() && cfg.model?.trim());
 
 /**
+ * OpenAI 的 gpt-image 系（gpt-image-1 / gpt-image-2 / 中转站上的 `openai/gpt-image-*`）。
+ *
+ * 它跟 DALL·E 共用 `/images/generations` 这个地址，参数却更严：**多传一个不认识的字段
+ * 就整个 400**（`Unknown parameter: 'response_format'`），不像多数中转站那样默默忽略。
+ * 具体来说 `response_format` / `seed` / `negative_prompt` 它一个都不收——
+ * 前者是因为它**固定**返回 b64_json，压根没有第二种形态可选。
+ *
+ * 所以这几个字段对它一律不发。用户在设置页填了也不发（填的时候没人知道会撞上这个），
+ * 发了的结果是一次 400 + 一条 `[图片：…]` 降级文字，比悄悄少传一个参数糟得多。
+ */
+const isGptImageModel = (model: string): boolean =>
+  /(^|[/:])gpt-image/i.test((model || '').trim());
+
+/**
  * 模块级单例 —— 与 utils/ttsProvider.ts 的 ttsProvider / voicePromptOverrides 同一套思路。
  *
  * chatPrompts.buildSystemPrompt 拿不到 apiConfig，但它要决定「这一轮到底教不教角色
@@ -100,6 +114,24 @@ export interface GenerateImageOptions {
   signal?: AbortSignal;
   /** 覆盖配置里的尺寸（留给「重新生成时换个比例」这类调用方）。 */
   size?: string;
+  /**
+   * 固定随机种子（角色自拍用，见 CharacterProfile.imageGen.seed）。
+   * 传了就随请求体发出去；SD 系模型认它，DALL·E 3 会忽略。
+   */
+  seed?: number;
+}
+
+/**
+ * 自拍提示词：角色的固定外貌 + 模型现写的场景/动作/表情。
+ *
+ * 外貌放最前面 —— 生图模型普遍对提示词前段权重更高，把长相压在一堆场景词后面
+ * 容易被稀释成路人。`selfie` 这个词也一并前置，否则模型常画成第三人称的人物立绘。
+ */
+export function buildSelfiePrompt(appearance: string, scene: string): string {
+  const look = (appearance || '').trim().replace(/[,，。;；\s]+$/, '');
+  const what = (scene || '').trim();
+  if (!look) return what;
+  return what ? `selfie photo, ${look}, ${what}` : `selfie photo, ${look}`;
 }
 
 /**
@@ -177,6 +209,8 @@ export async function generateImage(
 
   const size = (options.size ?? cfg.size ?? '').trim();
   const responseFormat = cfg.responseFormat ?? 'b64_json';
+  // gpt-image 系对多余字段是硬报错而不是忽略，见 isGptImageModel。
+  const gptImage = isGptImageModel(cfg.model);
 
   const body: Record<string, any> = {
     model: cfg.model.trim(),
@@ -184,9 +218,22 @@ export async function generateImage(
     n: 1,
   };
   if (size) body.size = size;
-  if (responseFormat !== 'auto') body.response_format = responseFormat;
+  if (!gptImage && responseFormat !== 'auto') body.response_format = responseFormat;
   const negative = (cfg.negativePrompt || '').trim();
-  if (negative) body.negative_prompt = negative;
+  if (negative && !gptImage) body.negative_prompt = negative;
+  // 0 是合法种子，别用 truthy 判断把它吃掉。
+  if (!gptImage && typeof options.seed === 'number' && Number.isFinite(options.seed)) body.seed = options.seed;
+
+  if (gptImage) {
+    const dropped = [
+      responseFormat !== 'auto' ? 'response_format' : '',
+      negative ? 'negative_prompt' : '',
+      typeof options.seed === 'number' ? 'seed' : '',
+    ].filter(Boolean);
+    if (dropped.length) {
+      console.info(`[ImageGen] ${cfg.model} 是 gpt-image 系，不支持 ${dropped.join(' / ')}，这几个字段本次不发送`);
+    }
+  }
 
   // extraBody 里用户写的字段优先级最高——他们填这个就是为了覆盖上面的默认。
   if (cfg.extraBody?.trim()) {
@@ -234,7 +281,16 @@ export async function generateImage(
   }
   if (!res.ok) {
     const detail = data?.error?.message || data?.message || data?.detail || rawText.slice(0, 200);
-    throw new Error(`生图失败 (HTTP ${res.status}): ${detail}`);
+    // 「多传了一个它不认识的字段」是这类接口最常见的失败，而原始报错只会甩一个参数名，
+    // 用户不知道那是哪来的（多半是设置页某个可选项，或者自己填的附加参数 JSON）。
+    // 顺手把话说到「去哪儿改」这一层。
+    const unknownParam = /unknown\s+parameter|unsupported\s+parameter|unrecognized|extra fields|not permitted/i.test(String(detail));
+    const hint = unknownParam
+      ? '（这个模型不认识请求里的某个字段——去「设置 → 生图 API → 高级选项」把「返回格式」改成「不指定」、清空「负向提示词」和「附加参数」再试）'
+      : /size/i.test(String(detail)) && res.status === 400
+        ? '（多半是图片尺寸这个模型不支持，换一个尺寸预设试试）'
+        : '';
+    throw new Error(`生图失败 (HTTP ${res.status}): ${detail}${hint}`);
   }
 
   const { b64, url, revised } = extractImagePayload(data);

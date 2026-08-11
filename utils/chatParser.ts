@@ -503,19 +503,23 @@ export const ChatParser = {
         return stripped.length > 0;
     },
 
-    // Split text into bubbles (text / emojis / 生图)
+    // Split text into bubbles (text / emojis / 生图 / 自拍)
     //
-    // 表情和生图共用一条扫描：两者都是「按模型写的位置原地插一条非文字气泡」，
-    // 分两趟扫会丢掉它们彼此之间的先后顺序（角色先发图再发表情，就会变成先表情后图）。
+    // 三种标签共用一条扫描：都是「按模型写的位置原地插一条非文字气泡」，分几趟扫
+    // 会丢掉它们彼此之间的先后顺序（角色先发图再发表情，就会变成先表情后图）。
     // 全角冒号一并容 —— 中文输入法下 `[[SEND_IMAGE：…]]` 是高频手写变体，跟
     // sanitize.ts 里 SEND_EMOJI 容全角冒号同一个理由。
-    splitResponse: (content: string): { type: 'text' | 'emoji' | 'image', content: string }[] => {
+    //
+    // SEND_SELFIE 与 SEND_IMAGE 分开，是因为两者送进生图模型的东西不一样：
+    // 自拍要由代码把角色的固定外貌拼在最前面（见 imageGenApi.buildSelfiePrompt），
+    // 普通照片不能拼——否则角色拍个晚饭，画面里也会硬塞进一个人。
+    splitResponse: (content: string): { type: 'text' | 'emoji' | 'image', content: string, selfie?: boolean }[] => {
         // `[^\[\]]*?` 而不是 `.*?`：描述里允许换行（生图 prompt 常写得很长），但不许跨过方括号。
         // 放行方括号的话，模型漏写闭合的 `[[SEND_IMAGE: 没闭合` 会一路吞到下一个标签的 `]]`，
         // 把半段正文连同后面那个 `[[SEND_EMOJI]]` 一起吃成图片描述。
         // 「标签内不含方括号」也是 chunkText 那条括号保护正则用的同一个约定。
-        const tagPattern = /\[\[(SEND_EMOJI|SEND_IMAGE)[:：]\s*([^\[\]]*?)\]\]/g;
-        const parts: {type: 'text' | 'emoji' | 'image', content: string}[] = [];
+        const tagPattern = /\[\[(SEND_EMOJI|SEND_IMAGE|SEND_SELFIE)[:：]\s*([^\[\]]*?)\]\]/g;
+        const parts: {type: 'text' | 'emoji' | 'image', content: string, selfie?: boolean}[] = [];
         let lastIndex = 0;
         let emojiMatch;
 
@@ -524,10 +528,14 @@ export const ChatParser = {
                 const textBefore = content.slice(lastIndex, emojiMatch.index).trim();
                 if (textBefore) parts.push({ type: 'text', content: textBefore });
             }
+            const tag = emojiMatch[1];
             const payload = emojiMatch[2].trim();
             // 描述是空的就整个丢掉：空 prompt 调生图只会白烧一次额度。
-            if (payload) {
-                parts.push({ type: emojiMatch[1] === 'SEND_IMAGE' ? 'image' : 'emoji', content: payload });
+            // 自拍是例外 —— 外貌由代码拼，模型只写场景，场景空着也能出一张纯人像。
+            if (payload || tag === 'SEND_SELFIE') {
+                if (tag === 'SEND_EMOJI') parts.push({ type: 'emoji', content: payload });
+                else if (tag === 'SEND_SELFIE') parts.push({ type: 'image', content: payload, selfie: true });
+                else parts.push({ type: 'image', content: payload });
             }
             lastIndex = emojiMatch.index + emojiMatch[0].length;
         }

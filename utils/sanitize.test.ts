@@ -335,6 +335,19 @@ describe('sanitizeIntoSegments', () => {
     expect(segs.map(s => s.sanitized)).toEqual(['[图片：晚饭]', '[表情：得意]']);
   });
 
+  it('SEND_SELFIE 独立成段，banner 写「自拍」而不是「图片」', () => {
+    const segs = sanitizeIntoSegments('刚拍的\n[[SEND_SELFIE: 在厨房]]');
+    expect(segs).toEqual([
+      { raw: '刚拍的', sanitized: '刚拍的' },
+      { raw: '[[SEND_SELFIE: 在厨房]]', sanitized: '[自拍：在厨房]' },
+    ]);
+  });
+
+  it('空描述的自拍也保留（外貌由客户端拼，场景可以空）', () => {
+    const segs = sanitizeIntoSegments('[[SEND_SELFIE: ]]');
+    expect(segs).toEqual([{ raw: '[[SEND_SELFIE: ]]', sanitized: '[自拍]' }]);
+  });
+
   it('inline SEND_EMOJI 在文字中间 → 拆 3 段 (text/emoji/text)', () => {
     const segs = sanitizeIntoSegments('你看 [[SEND_EMOJI: 笑]] 我没事的');
     expect(segs).toEqual([

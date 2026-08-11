@@ -2543,6 +2543,15 @@ ${ATOM_MARKER}B${idx}${ATOM_MARKER}
         });
         continue;
       }
+      if (part.kind === "image") {
+        const label = part.selfie ? "\u81EA\u62CD" : "\u56FE\u7247";
+        const brief = part.description && part.description.length <= 12 ? `[${label}\uFF1A${part.description}]` : `[${label}]`;
+        segments.push({
+          raw: `[[${part.selfie ? "SEND_SELFIE" : "SEND_IMAGE"}: ${part.description}]]`,
+          sanitized: brief
+        });
+        continue;
+      }
       let rawText = part.text.replace(
         GLOBAL_RE,
         (_m, n) => atomBlocks[Number(n)]?.raw || ""
@@ -2595,7 +2604,7 @@ function chunkText(text) {
   return out;
 }
 function splitOnSendEmoji(chunk) {
-  const re = /\[\[SEND_EMOJI[:：]\s*(.*?)\]\]/g;
+  const re = /\[\[(SEND_EMOJI|SEND_IMAGE|SEND_SELFIE)[:：]\s*([^\[\]]*?)\]\]/g;
   const parts = [];
   let lastIndex = 0;
   let m;
@@ -2603,7 +2612,12 @@ function splitOnSendEmoji(chunk) {
     if (m.index > lastIndex) {
       parts.push({ kind: "text", text: chunk.slice(lastIndex, m.index) });
     }
-    parts.push({ kind: "emoji", name: m[1].trim() });
+    const payload = m[2].trim();
+    if (payload || m[1] === "SEND_SELFIE") {
+      if (m[1] === "SEND_SELFIE") parts.push({ kind: "image", description: payload, selfie: true });
+      else if (m[1] === "SEND_IMAGE") parts.push({ kind: "image", description: payload });
+      else parts.push({ kind: "emoji", name: payload });
+    }
     lastIndex = m.index + m[0].length;
   }
   if (lastIndex < chunk.length) {

@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
   buildImagePrompt,
+  buildSelfiePrompt,
   generateImage,
   isImageGenConfigured,
   isImageGenEnabled,
@@ -74,6 +75,29 @@ describe('buildImagePrompt', () => {
 
   it('描述为空但有模板 → 只用模板（不留下孤零零的逗号）', () => {
     expect(buildImagePrompt('  ', cfg({ promptTemplate: 'masterpiece' }))).toBe('masterpiece');
+  });
+});
+
+// 自拍的一致性全靠「外貌由固定文本负责、模型只写场景」这条分工。
+// 外貌被挤到提示词末尾、或者模型自己写的场景把它冲掉，画出来就是另一个人。
+describe('buildSelfiePrompt', () => {
+  it('外貌前置 + selfie 关键词打头（生图模型对提示词前段权重更高）', () => {
+    expect(buildSelfiePrompt('1girl, 银色长发, 红瞳', '窝在沙发上比耶'))
+      .toBe('selfie photo, 1girl, 银色长发, 红瞳, 窝在沙发上比耶');
+  });
+
+  it('场景为空 → 只有外貌，不留孤零零的逗号（能出一张纯人像）', () => {
+    expect(buildSelfiePrompt('1girl, 银色长发', '')).toBe('selfie photo, 1girl, 银色长发');
+  });
+
+  it('外貌末尾的中英文标点被吃掉，不会拼成 "红瞳，, 场景"', () => {
+    expect(buildSelfiePrompt('1girl, 红瞳。', '在厨房')).toBe('selfie photo, 1girl, 红瞳, 在厨房');
+    expect(buildSelfiePrompt('1girl, 红瞳, ', '在厨房')).toBe('selfie photo, 1girl, 红瞳, 在厨房');
+  });
+
+  it('没填外貌 → 退回纯场景（调用方会据此退化成普通生图）', () => {
+    expect(buildSelfiePrompt('', '在厨房')).toBe('在厨房');
+    expect(buildSelfiePrompt('   ', '在厨房')).toBe('在厨房');
   });
 });
 
@@ -178,6 +202,62 @@ describe('generateImage', () => {
     await expect(generateImage('一只猫', cfg({ model: '' }))).rejects.toThrow(/没配全/);
     expect(fetchMock).not.toHaveBeenCalled();
   });
+
+  it('传了 seed → 进请求体（自拍一致性靠它）', async () => {
+    fetchMock.mockResolvedValue(jsonRes({ data: [{ b64_json: PNG_B64 }] }));
+    await generateImage('一只猫', cfg(), { seed: 12345 });
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body).seed).toBe(12345);
+  });
+
+  it('seed 为 0 也要发出去（0 是合法种子，别被 truthy 判断吃掉）', async () => {
+    fetchMock.mockResolvedValue(jsonRes({ data: [{ b64_json: PNG_B64 }] }));
+    await generateImage('一只猫', cfg(), { seed: 0 });
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body).seed).toBe(0);
+  });
+
+  it('没传 seed → 不带 seed 字段（普通照片每张都该不一样）', async () => {
+    fetchMock.mockResolvedValue(jsonRes({ data: [{ b64_json: PNG_B64 }] }));
+    await generateImage('一只猫', cfg());
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body)).not.toHaveProperty('seed');
+  });
+
+  // gpt-image 系多传一个不认识的字段就整个 400（不像多数中转站会忽略），
+  // 所以这三个字段对它必须一个都不发 —— 否则用户配好了也是一次报错 + 一条降级文字。
+  describe('gpt-image 兼容', () => {
+    it.each(['gpt-image-1', 'gpt-image-2', 'openai/gpt-image-2'])(
+      '%s → 不发 response_format / seed / negative_prompt',
+      async (model) => {
+        fetchMock.mockResolvedValue(jsonRes({ data: [{ b64_json: PNG_B64 }] }));
+        await generateImage('一只猫', cfg({ model, negativePrompt: 'lowres', responseFormat: 'b64_json' }), { seed: 42 });
+        const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+        expect(body).not.toHaveProperty('response_format');
+        expect(body).not.toHaveProperty('seed');
+        expect(body).not.toHaveProperty('negative_prompt');
+        // 该发的还得发
+        expect(body).toMatchObject({ model, n: 1, prompt: '一只猫' });
+      },
+    );
+
+    it('非 gpt-image 的模型不受影响（照发这三个字段）', async () => {
+      fetchMock.mockResolvedValue(jsonRes({ data: [{ b64_json: PNG_B64 }] }));
+      await generateImage('一只猫', cfg({ model: 'dall-e-3', negativePrompt: 'lowres' }), { seed: 42 });
+      const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+      expect(body.response_format).toBe('b64_json');
+      expect(body.seed).toBe(42);
+      expect(body.negative_prompt).toBe('lowres');
+    });
+
+    it('名字里带 image 但不是 gpt-image 的别误伤（如 flux-image）', async () => {
+      fetchMock.mockResolvedValue(jsonRes({ data: [{ b64_json: PNG_B64 }] }));
+      await generateImage('一只猫', cfg({ model: 'flux-image-pro' }), { seed: 7 });
+      expect(JSON.parse(fetchMock.mock.calls[0][1].body).seed).toBe(7);
+    });
+  });
+
+  it('返回「未知参数」类报错 → 错误信息里带上「去哪儿改」', async () => {
+    fetchMock.mockResolvedValue(jsonRes({ error: { message: "Unknown parameter: 'response_format'." } }, false, 400));
+    await expect(generateImage('一只猫', cfg())).rejects.toThrow(/高级选项/);
+  });
 });
 
 // splitResponse 是 [[SEND_IMAGE]] 进入渲染管线的唯一入口 —— 顺序错了就是
@@ -223,6 +303,38 @@ describe('splitResponse: [[SEND_IMAGE]]', () => {
   it('没有任何标签时行为不变', () => {
     expect(ChatParser.splitResponse('就是一句普通的话')).toEqual([
       { type: 'text', content: '就是一句普通的话' },
+    ]);
+  });
+});
+
+describe('splitResponse: [[SEND_SELFIE]]', () => {
+  it('拆出带 selfie 标记的 image part', () => {
+    expect(ChatParser.splitResponse('刚拍的\n[[SEND_SELFIE: 窝在沙发上比耶]]')).toEqual([
+      { type: 'text', content: '刚拍的' },
+      { type: 'image', content: '窝在沙发上比耶', selfie: true },
+    ]);
+  });
+
+  it('普通生图不带 selfie 标记（否则角色拍个晚饭也会被塞进一张脸）', () => {
+    const parts = ChatParser.splitResponse('[[SEND_IMAGE: 今天的晚饭]]');
+    expect(parts).toEqual([{ type: 'image', content: '今天的晚饭' }]);
+    expect(parts[0].selfie).toBeUndefined();
+  });
+
+  it('自拍描述为空也保留（外貌由代码拼，场景空着能出纯人像）', () => {
+    expect(ChatParser.splitResponse('[[SEND_SELFIE: ]]')).toEqual([
+      { type: 'image', content: '', selfie: true },
+    ]);
+  });
+
+  it('三种标签混排时顺序不乱', () => {
+    expect(ChatParser.splitResponse('看[[SEND_SELFIE: 在厨房]]还有这个[[SEND_IMAGE: 晚饭]]好吃吧[[SEND_EMOJI: 得意]]')).toEqual([
+      { type: 'text', content: '看' },
+      { type: 'image', content: '在厨房', selfie: true },
+      { type: 'text', content: '还有这个' },
+      { type: 'image', content: '晚饭' },
+      { type: 'text', content: '好吃吧' },
+      { type: 'emoji', content: '得意' },
     ]);
   });
 });
