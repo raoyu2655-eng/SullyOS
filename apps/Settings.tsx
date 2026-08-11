@@ -493,6 +493,8 @@ const Settings: React.FC = () => {
   const [showImgGenAdvanced, setShowImgGenAdvanced] = useState(false);
   const [imgGenStatusMsg, setImgGenStatusMsg] = useState('');
   const [testingImgGen, setTestingImgGen] = useState(false);
+  // 测试已经跑了多少秒。慢链路上没有它，用户只能对着转圈的按钮猜是不是死了。
+  const [imgGenElapsed, setImgGenElapsed] = useState(0);
   // 测试结果保留预览图：光说「成功」用户还是不知道画出来的是什么风格 / 尺寸对不对。
   const [imgGenTestResult, setImgGenTestResult] = useState<{ ok: boolean; msg: string; preview?: string } | null>(null);
   const [localTtsProvider, setLocalTtsProvider] = useState<'minimax' | 'fishaudio'>(
@@ -1114,7 +1116,14 @@ const Settings: React.FC = () => {
     setTimeout(() => setImgGenStatusMsg(''), 2400);
   };
 
-  const handleTestImageGen = async () => {
+  /**
+   * 出图慢到这个程度就不再顺带探锁脸了 —— 探测本身是第二次完整生图，
+   * 在慢链路上等于把等待时间翻倍。慢链路的用户此刻最需要的是「主结论 + 耗时」，
+   * 不是一个可选功能的支持情况。
+   */
+  const IMG_PROBE_SKIP_MS = 30_000;
+
+  const runImageGenTest = async (opts: { probeReference: boolean }) => {
     // 测试时强制 enabled：用户多半是想「先试通了再打开开关」。
     const cfg: ImageGenApiConfig = { ...buildImageGenConfig(), enabled: true };
     if (!cfg.baseUrl || !cfg.apiKey || !cfg.model) {
@@ -1123,32 +1132,88 @@ const Settings: React.FC = () => {
     }
     setTestingImgGen(true);
     setImgGenTestResult(null);
+    // 秒表：慢链路上没有它，用户只能对着一个转圈的按钮猜「是不是死了」。
+    // 而且耗时本身就是诊断信息 —— 卡在 100 秒左右基本就是网关超时。
+    setImgGenElapsed(0);
+    const startedAt = Date.now();
+    const ticker = setInterval(() => setImgGenElapsed(Math.round((Date.now() - startedAt) / 1000)), 1000);
     try {
       const result = await generateImage('a cute cat sitting on a windowsill, soft morning light', cfg);
-      // 出图通了再顺手探一次「锁脸」——即 /images/edits 这个端点在不在。
-      // 很多中转站只代理了 /images/generations，用户配好了才发现锁脸是空的。
-      // 探测失败不影响主结论：这一步只是补充信息。
+      const genMs = Date.now() - startedAt;
+      const secs = (genMs / 1000).toFixed(1);
+
+      // 出图通了再看要不要探锁脸（/images/edits 在不在）。慢链路自动跳过，留个手动按钮。
       let refNote = '';
-      try {
-        const probe = await probeReferenceSupport(cfg);
-        refNote = probe.status === 'ok'
-          ? '｜🔒 锁脸可用（支持参考图）'
-          : probe.status === 'unsupported'
-            ? '｜⚠️ 不支持锁脸：这个 API 没有 /images/edits，角色自拍只能靠文字描述'
-            : `｜锁脸探测未完成：${probe.detail.slice(0, 60)}`;
-      } catch { /* 探测本身出错不算数 */ }
+      if (!opts.probeReference) {
+        refNote = '';
+      } else if (genMs > IMG_PROBE_SKIP_MS) {
+        refNote = '｜出图较慢，已跳过锁脸探测（可点下方按钮单独探）';
+      } else {
+        try {
+          const probe = await probeReferenceSupport(cfg);
+          refNote = probe.status === 'ok'
+            ? '｜🔒 锁脸可用（支持参考图）'
+            : probe.status === 'unsupported'
+              ? '｜⚠️ 不支持锁脸：这个 API 没有 /images/edits，角色自拍只能靠文字描述'
+              : `｜锁脸探测未完成：${probe.detail.slice(0, 60)}`;
+        } catch { /* 探测本身出错不算数 */ }
+      }
+
+      const slowNote = genMs > 60_000
+        ? `｜⚠️ 耗时 ${secs} 秒，已经很接近多数网关的 100 秒上限——角色聊天里发图很可能会超时失败。建议把尺寸调到最小、或换个更快的模型`
+        : '';
       setImgGenTestResult({
         ok: true,
         msg: (result.isRemoteUrl
-          ? '出图成功，但图片是以链接形式存的（跨域抓不回来），聊天记录里的图日后可能失效——建议把「返回格式」改成 b64_json'
-          : `出图成功（${cfg.size || '服务端默认尺寸'}）`) + refNote,
+          ? `出图成功（耗时 ${secs} 秒），但图片是以链接形式存的（跨域抓不回来），聊天记录里的图日后可能失效——建议把「返回格式」改成 b64_json`
+          : `出图成功（${cfg.size || '服务端默认尺寸'} · 耗时 ${secs} 秒）`) + slowNote + refNote,
         preview: result.content,
       });
       trackEvent('测试生图 API', { result: '成功' });
     } catch (error: any) {
-      setImgGenTestResult({ ok: false, msg: error?.message || '未知错误' });
+      const secs = ((Date.now() - startedAt) / 1000).toFixed(1);
+      const raw = error?.message || '未知错误';
+      // 「等了很久 + 一个字节都没收到」这种形态几乎不可能是模型或参数的问题，
+      // 而是链路上某一跳（网关 / 代理）在自己的超时点掐断了连接。
+      // 不说清楚的话，用户会一直在参数和 Key 上打转。
+      const looksLikeGatewayTimeout = /连不上生图接口|Failed to fetch|NetworkError|超时/i.test(raw)
+        && (Date.now() - startedAt) > 45_000;
+      const diag = looksLikeGatewayTimeout
+        ? `\n\n诊断：等了 ${secs} 秒、一个字节都没收到。这种形态基本不是模型或参数的问题——多半是出图太慢，链路上某一跳（中转站网关 / 你的代理）在自己的超时点把连接掐了。可以试：① 附加参数填 {"quality":"low"} ② 尺寸换成最小的 1024x1024 ③ 临时换一个快模型（如 flux-schnell）验证——快模型能通就坐实了是超时。`
+        : `\n\n（耗时 ${secs} 秒）`;
+      setImgGenTestResult({ ok: false, msg: raw + diag });
       trackEvent('测试生图 API', { result: '失败' });
     } finally {
+      clearInterval(ticker);
+      setTestingImgGen(false);
+    }
+  };
+
+  const handleTestImageGen = () => runImageGenTest({ probeReference: true });
+
+  /** 单独探锁脸（/images/edits）—— 慢链路上主测试会跳过它。 */
+  const handleProbeReference = async () => {
+    const cfg: ImageGenApiConfig = { ...buildImageGenConfig(), enabled: true };
+    if (!cfg.baseUrl || !cfg.apiKey || !cfg.model) {
+      setImgGenTestResult({ ok: false, msg: '请先填写完整的 URL、Key 和模型' });
+      return;
+    }
+    setTestingImgGen(true);
+    setImgGenElapsed(0);
+    const startedAt = Date.now();
+    const ticker = setInterval(() => setImgGenElapsed(Math.round((Date.now() - startedAt) / 1000)), 1000);
+    try {
+      const probe = await probeReferenceSupport(cfg);
+      setImgGenTestResult({
+        ok: probe.status === 'ok',
+        msg: probe.status === 'ok'
+          ? '🔒 锁脸可用：这个 API 支持参考图，角色自拍能照着固定的脸画'
+          : probe.status === 'unsupported'
+            ? `不支持锁脸：${probe.detail}。角色自拍仍可用，但只能靠文字描述控制长相`
+            : `探测未完成：${probe.detail}`,
+      });
+    } finally {
+      clearInterval(ticker);
       setTestingImgGen(false);
     }
   };
@@ -2835,7 +2900,7 @@ const Settings: React.FC = () => {
                         disabled={testingImgGen || !localImgGenUrl.trim() || !localImgGenKey.trim() || !localImgGenModel.trim()}
                         className="py-3 rounded-2xl font-bold text-pink-600 border border-pink-200 bg-pink-50 active:scale-95 transition-all disabled:opacity-40"
                     >
-                        {testingImgGen ? '出图中…' : '🎨 测试生图'}
+                        {testingImgGen ? `出图中… ${imgGenElapsed}s` : '🎨 测试生图'}
                     </button>
                     <button
                         type="button"
@@ -2846,6 +2911,14 @@ const Settings: React.FC = () => {
                         保存生图 API
                     </button>
                 </div>
+                <button
+                    type="button"
+                    onClick={handleProbeReference}
+                    disabled={testingImgGen || !localImgGenUrl.trim() || !localImgGenKey.trim() || !localImgGenModel.trim()}
+                    className="w-full py-2.5 rounded-2xl font-semibold text-[11px] text-slate-500 border border-slate-200 bg-white/60 active:scale-95 transition-all disabled:opacity-40"
+                >
+                    🔒 只探锁脸支持（/images/edits）
+                </button>
                 {imgGenStatusMsg && (
                     <div className="text-[11px] text-center text-pink-600 bg-pink-50 px-3 py-2 rounded-xl">{imgGenStatusMsg}</div>
                 )}
@@ -2854,7 +2927,7 @@ const Settings: React.FC = () => {
                     <div className={`text-xs px-3 py-2 rounded-xl leading-relaxed ${
                         imgGenTestResult.ok ? 'bg-emerald-50 text-emerald-700' : 'bg-red-50 text-red-600'
                     }`}>
-                        <div>{imgGenTestResult.ok ? '✅ ' : '❌ '}{imgGenTestResult.msg}</div>
+                        <div className="whitespace-pre-wrap">{imgGenTestResult.ok ? '✅ ' : '❌ '}{imgGenTestResult.msg}</div>
                         {imgGenTestResult.preview && (
                             <img src={imgGenTestResult.preview} alt="测试出图" className="mt-2 max-w-[180px] rounded-xl shadow-sm" />
                         )}
