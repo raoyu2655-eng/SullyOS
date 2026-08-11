@@ -13,8 +13,18 @@ export const BUILD_LABEL = `${__BUILD_BRANCH__}@${__BUILD_COMMIT__}`;
 /** 构建时间标签，固定由 Vite 按 UTC+8 注入，避免受用户本机时区影响。 */
 export const BUILD_TIME_LABEL = __BUILD_TIME__;
 
-/** 设置页底部的产品版本名（手工维护），跟构建 hash 是两码事——发版前改这里。 */
-export const APP_VERSION = 'v3.4 (Live2D)';
+/**
+ * 设置页底部的产品版本名（手工维护），跟构建 hash 是两码事——发版前改这里。
+ *
+ * 本 fork 在上游 v3.4 基础上加了整套生图（角色发图 / 自拍锁脸）。代号后面挂一段
+ * 自己的标记，好在设置页一眼认出「手机上这台跑的是不是带生图的版本」——
+ * 这一轮排查里，僵尸 dev server 和没重新部署的 worker 都是靠猜才定位到的，
+ * 界面上有个能对的版本名会省掉那几轮。
+ *
+ * 前面那半截仍是 `v3.4`，跟上游对齐：APP_VERSION_TAG 取空格前的部分当统计标签，
+ * 改动代号不会把数据切到一个新桶里去。
+ */
+export const APP_VERSION = 'v3.4 (Live2D) + 生图锁脸';
 
 /**
  * 版本号那半截（`v3.0`）。统计给每条记录打的标签用它，面板里按版本切分数据时
