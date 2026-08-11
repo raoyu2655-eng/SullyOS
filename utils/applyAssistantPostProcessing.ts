@@ -612,11 +612,28 @@ export async function applyAssistantPostProcessing(
 
             addToast(isSelfie ? `${char.name} 正在自拍...` : `${char.name} 正在画图...`, 'info');
             try {
-                const result = await generateImage(prompt, cfg!, {
+                // 锁脸参考图同样只给自拍用：拿角色的脸去画「今天的晚饭」只会得到
+                // 一盘长着人脸的菜。
+                const faceRef = asSelfie ? (char.imageGen?.faceRef || '').trim() : '';
+                const genOpts = {
                     // 固定种子只给自拍用：普通照片每张都该长得不一样，锁了种子
                     // 会让「今天的晚饭」和「路上的猫」画出诡异雷同的构图。
                     ...(asSelfie && typeof seed === 'number' ? { seed } : {}),
-                });
+                };
+                let result;
+                if (faceRef) {
+                    try {
+                        result = await generateImage(prompt, cfg!, { ...genOpts, referenceImage: faceRef });
+                    } catch (refErr: any) {
+                        // 服务商没代理 /images/edits —— 回落到纯文字那条路。锁脸是锦上添花，
+                        // 不该因为它把原本能出的图整个弄没。别的错误照常抛给外层。
+                        if (refErr?.name !== 'ReferenceUnsupportedError') throw refErr;
+                        console.warn('[ImageGen] 这个 API 不支持参考图，本次回落到纯文字生图:', refErr.message);
+                        result = await generateImage(prompt, cfg!, genOpts);
+                    }
+                } else {
+                    result = await generateImage(prompt, cfg!, genOpts);
+                }
                 await persistMessage({
                     charId: char.id, role: 'assistant', type: 'image',
                     content: result.content,
@@ -630,6 +647,7 @@ export async function applyAssistantPostProcessing(
                             size: cfg!.size,
                             selfie: asSelfie || undefined,
                             seed: asSelfie && typeof seed === 'number' ? seed : undefined,
+                            faceLocked: (asSelfie && !!(char.imageGen?.faceRef || '').trim()) || undefined,
                             // 存链接（抓不回来时的兜底）的图会过期，标出来方便日后排查裂图。
                             remote: result.isRemoteUrl || undefined,
                         },

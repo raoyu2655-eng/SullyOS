@@ -2,6 +2,8 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
   buildImagePrompt,
   buildSelfiePrompt,
+  dataUrlToFile,
+  probeReferenceSupport,
   generateImage,
   isImageGenConfigured,
   isImageGenEnabled,
@@ -251,6 +253,94 @@ describe('generateImage', () => {
       fetchMock.mockResolvedValue(jsonRes({ data: [{ b64_json: PNG_B64 }] }));
       await generateImage('一只猫', cfg({ model: 'flux-image-pro' }), { seed: 7 });
       expect(JSON.parse(fetchMock.mock.calls[0][1].body).seed).toBe(7);
+    });
+  });
+
+  // 锁脸：有参考图就改走 /images/edits（multipart）。这条路的关键约束是
+  // 「不支持时必须安静回落」—— 锁脸是锦上添花，不该因为它把原本能出的图弄没。
+  describe('锁脸（参考图）', () => {
+    const TINY = 'data:image/png;base64,' + PNG_B64;
+
+    it('传了参考图 → 打 /images/edits，且用 multipart 而不是 JSON', async () => {
+      fetchMock.mockResolvedValue(jsonRes({ data: [{ b64_json: PNG_B64 }] }));
+      await generateImage('在厨房', cfg(), { referenceImage: TINY });
+      const [url, init] = fetchMock.mock.calls[0];
+      expect(url).toBe('https://api.example.com/v1/images/edits');
+      expect(init.body).toBeInstanceOf(FormData);
+      // 手写 Content-Type 会漏掉 multipart 的 boundary，服务端直接解析失败
+      expect(init.headers['Content-Type']).toBeUndefined();
+      const form = init.body as FormData;
+      expect(form.get('prompt')).toBe('在厨房');
+      expect(form.get('image')).toBeInstanceOf(File);
+    });
+
+    it('没传参考图 → 还是走 /images/generations', async () => {
+      fetchMock.mockResolvedValue(jsonRes({ data: [{ b64_json: PNG_B64 }] }));
+      await generateImage('在厨房', cfg());
+      expect(fetchMock.mock.calls[0][0]).toBe('https://api.example.com/v1/images/generations');
+    });
+
+    it('baseUrl 粘成 .../images/generations 时，锁脸也能正确换成 /images/edits', async () => {
+      fetchMock.mockResolvedValue(jsonRes({ data: [{ b64_json: PNG_B64 }] }));
+      await generateImage('在厨房', cfg({ baseUrl: 'https://api.example.com/v1/images/generations' }), { referenceImage: TINY });
+      expect(fetchMock.mock.calls[0][0]).toBe('https://api.example.com/v1/images/edits');
+    });
+
+    it.each([404, 405, 501])('端点不存在（HTTP %i）→ 抛 ReferenceUnsupportedError 供调用方回落', async (status) => {
+      fetchMock.mockResolvedValue(jsonRes({ error: { message: 'not found' } }, false, status));
+      await expect(generateImage('在厨房', cfg(), { referenceImage: TINY }))
+        .rejects.toMatchObject({ name: 'ReferenceUnsupportedError' });
+    });
+
+    it('网络层直接连不上 → 也算不支持（中转站没这个路由时常见）', async () => {
+      fetchMock.mockRejectedValue(new TypeError('Failed to fetch'));
+      await expect(generateImage('在厨房', cfg(), { referenceImage: TINY }))
+        .rejects.toMatchObject({ name: 'ReferenceUnsupportedError' });
+    });
+
+    it('端点在但业务报错（余额不足）→ 普通错误，不能误判成「不支持」', async () => {
+      fetchMock.mockResolvedValue(jsonRes({ error: { message: 'insufficient balance' } }, false, 402));
+      const err = await generateImage('在厨房', cfg(), { referenceImage: TINY }).catch(e => e);
+      expect(err.name).not.toBe('ReferenceUnsupportedError');
+      expect(err.message).toMatch(/402/);
+    });
+
+    it('gpt-image 走锁脸时同样不发 response_format', async () => {
+      fetchMock.mockResolvedValue(jsonRes({ data: [{ b64_json: PNG_B64 }] }));
+      await generateImage('在厨房', cfg({ model: 'gpt-image-2' }), { referenceImage: TINY });
+      expect((fetchMock.mock.calls[0][1].body as FormData).get('response_format')).toBeNull();
+    });
+
+    it('probeReferenceSupport：端点不存在 → unsupported', async () => {
+      fetchMock.mockResolvedValue(jsonRes({}, false, 404));
+      await expect(probeReferenceSupport(cfg())).resolves.toMatchObject({ status: 'unsupported' });
+    });
+
+    it('probeReferenceSupport：出图成功 → ok', async () => {
+      fetchMock.mockResolvedValue(jsonRes({ data: [{ b64_json: PNG_B64 }] }));
+      await expect(probeReferenceSupport(cfg())).resolves.toMatchObject({ status: 'ok' });
+    });
+
+    it('probeReferenceSupport：额度不足这类 → error（不能说成不支持，否则用户白白放弃）', async () => {
+      fetchMock.mockResolvedValue(jsonRes({ error: { message: 'no balance' } }, false, 402));
+      await expect(probeReferenceSupport(cfg())).resolves.toMatchObject({ status: 'error' });
+    });
+  });
+
+  describe('dataUrlToFile', () => {
+    it('还原出的 File 带正确 MIME 和字节数', () => {
+      const f = dataUrlToFile('data:image/png;base64,' + PNG_B64, 'face-ref');
+      expect(f.type).toBe('image/png');
+      expect(f.name).toBe('face-ref.png');
+      expect(f.size).toBeGreaterThan(0);
+    });
+
+    it('jpeg 的扩展名跟着 MIME 走', () => {
+      expect(dataUrlToFile('data:image/jpeg;base64,/9j/4AAQ', 'x').name).toBe('x.jpg');
+    });
+
+    it('不是 data URL → 明确报错，不静默产出空文件', () => {
+      expect(() => dataUrlToFile('https://example.com/a.png')).toThrow(/data URL/);
     });
   });
 

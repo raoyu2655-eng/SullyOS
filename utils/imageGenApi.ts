@@ -99,6 +99,24 @@ export function buildImagePrompt(description: string, cfg?: ImageGenApiConfig | 
   return desc ? `${tpl}, ${desc}` : tpl;
 }
 
+/**
+ * 把 data URL 还原成能塞进 FormData 的 File。
+ *
+ * 参考图是以 data URL 存在角色档案里的（跟头像 / 聊天图片同一套），而
+ * `/images/edits` 收的是 multipart 文件字段，中间必须过一道这个转换。
+ */
+export function dataUrlToFile(dataUrl: string, filename = 'reference.png'): File {
+  const m = /^data:([^;,]+)?(;base64)?,(.*)$/s.exec(dataUrl || '');
+  if (!m) throw new Error('参考图不是合法的 data URL');
+  const mime = m[1] || 'image/png';
+  const isBase64 = !!m[2];
+  const raw = isBase64 ? atob(m[3]) : decodeURIComponent(m[3]);
+  const bytes = new Uint8Array(raw.length);
+  for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
+  const ext = mime.includes('jpeg') || mime.includes('jpg') ? 'jpg' : mime.includes('webp') ? 'webp' : 'png';
+  return new File([bytes], filename.replace(/\.\w+$/, '') + '.' + ext, { type: mime });
+}
+
 export interface GenerateImageResult {
   /** 可以直接塞进 <img src> 的地址：data:image/...;base64,... 或（兜底时）远端链接。 */
   content: string;
@@ -119,6 +137,17 @@ export interface GenerateImageOptions {
    * 传了就随请求体发出去；SD 系模型认它，DALL·E 3 会忽略。
    */
   seed?: number;
+  /**
+   * 「锁脸」参考图（data URL，见 CharacterProfile.imageGen.faceRef）。
+   *
+   * 有它就改走 `POST {baseUrl}/images/edits`（multipart），让模型照着这张脸画新图 ——
+   * 这是纯文字描述做不到的那一层一致性：文字只能说「银发红瞳」，模型每次自己想象一张脸；
+   * 参考图是真的看着同一张脸画。
+   *
+   * 不是所有服务商都代理这个端点（很多中转站只转发 /images/generations），
+   * 所以调用方要准备好接住失败并回落到纯文字那条路。
+   */
+  referenceImage?: string;
 }
 
 /**
@@ -205,12 +234,23 @@ export async function generateImage(
 
   const base = cfg.baseUrl.trim().replace(/\/+$/, '');
   // 用户常把整条 /v1/images/generations 粘进来；照原样再拼一次就成了 .../generations/images/generations。
-  const endpoint = /\/images\/generations$/i.test(base) ? base : `${base}/images/generations`;
+  const root = base.replace(/\/images\/(?:generations|edits)$/i, '');
 
   const size = (options.size ?? cfg.size ?? '').trim();
   const responseFormat = cfg.responseFormat ?? 'b64_json';
   // gpt-image 系对多余字段是硬报错而不是忽略，见 isGptImageModel。
   const gptImage = isGptImageModel(cfg.model);
+  const reference = (options.referenceImage || '').trim();
+
+  // ── 锁脸分支：有参考图就走 /images/edits（multipart），让模型照着这张脸画 ──
+  if (reference) {
+    return await generateWithReference({
+      root, cfg, finalPrompt, size, reference, gptImage,
+      responseFormat, signal: options.signal,
+    });
+  }
+
+  const endpoint = `${root}/images/generations`;
 
   const body: Record<string, any> = {
     model: cfg.model.trim(),
@@ -272,6 +312,19 @@ export async function generateImage(
     options.signal?.removeEventListener('abort', onOuterAbort);
   }
 
+  return await parseImageResponse(res, finalPrompt, options.signal);
+}
+
+/**
+ * 两个端点（generations / edits）共用的响应处理：报错措辞、b64 / url 两种形态、
+ * URL 抓不回来时的兜底。抽出来是为了让锁脸那条路和纯文字那条路的行为**完全一致** ——
+ * 分两份写的话，「图床跨域退回存链接」这类边角逻辑迟早只在一边生效。
+ */
+async function parseImageResponse(
+  res: Response,
+  finalPrompt: string,
+  signal?: AbortSignal,
+): Promise<GenerateImageResult> {
   const rawText = await res.text();
   let data: any;
   try {
@@ -306,7 +359,7 @@ export async function generateImage(
     // 图床基本不给 CORS，抓不动是常态 —— 那就退回存链接：能显示多久算多久，
     // 总比整条消息没有图强（设置页会提示这个风险）。
     try {
-      const fileRes = await fetch(url, { signal: options.signal });
+      const fileRes = await fetch(url, { signal });
       if (!fileRes.ok) throw new Error(`HTTP ${fileRes.status}`);
       const blob = await fileRes.blob();
       if (!blob.size) throw new Error('下载到的是空文件');
@@ -318,4 +371,98 @@ export async function generateImage(
   }
 
   throw new Error(`生图接口没返回图片数据：${rawText.slice(0, 200)}`);
+}
+
+/** 服务商没代理 /images/edits 时抛这个，调用方据此回落到纯文字生图。 */
+export class ReferenceUnsupportedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ReferenceUnsupportedError';
+  }
+}
+
+/**
+ * 锁脸：`POST {root}/images/edits`（multipart），照着参考图画新图。
+ *
+ * 这个端点的支持面比 /images/generations 窄得多 —— 很多中转站压根没代理它。
+ * 404 / 405 / "not found" 一律翻译成 ReferenceUnsupportedError，让调用方
+ * 安静地回落到纯文字那条路：锁脸只是锦上添花，不该因为它把原本能出的图弄没了。
+ */
+async function generateWithReference(args: {
+  root: string;
+  cfg: ImageGenApiConfig;
+  finalPrompt: string;
+  size: string;
+  reference: string;
+  gptImage: boolean;
+  responseFormat: 'b64_json' | 'url' | 'auto';
+  signal?: AbortSignal;
+}): Promise<GenerateImageResult> {
+  const { root, cfg, finalPrompt, size, reference, gptImage, responseFormat, signal } = args;
+  const endpoint = `${root}/images/edits`;
+
+  const form = new FormData();
+  form.append('model', cfg.model.trim());
+  form.append('prompt', finalPrompt);
+  form.append('n', '1');
+  if (size) form.append('size', size);
+  // gpt-image 固定回 b64_json 且不收这个字段；其余服务商照发（DALL·E 2 edits 认它）。
+  if (!gptImage && responseFormat !== 'auto') form.append('response_format', responseFormat);
+  form.append('image', dataUrlToFile(reference, 'face-ref'));
+
+  // 注意：**不要**手写 Content-Type。multipart 需要 boundary，浏览器会自己带上；
+  // 手写会漏掉 boundary，服务端直接解析失败。
+  const timeoutMs = cfg.timeoutMs && cfg.timeoutMs > 0 ? cfg.timeoutMs : DEFAULT_TIMEOUT_MS;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const onOuterAbort = () => controller.abort();
+  signal?.addEventListener('abort', onOuterAbort, { once: true });
+
+  let res: Response;
+  try {
+    res = await fetch(endpoint, {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${cfg.apiKey.trim()}` },
+      body: form,
+      signal: controller.signal,
+    });
+  } catch (e: any) {
+    if (signal?.aborted) throw e;
+    if (e?.name === 'AbortError') throw new Error(`锁脸生图超时（>${Math.round(timeoutMs / 1000)} 秒）`);
+    throw new ReferenceUnsupportedError(`连不上 /images/edits：${e?.message || e}`);
+  } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener('abort', onOuterAbort);
+  }
+
+  if (res.status === 404 || res.status === 405 || res.status === 501) {
+    throw new ReferenceUnsupportedError(`这个 API 没有提供 /images/edits（HTTP ${res.status}）`);
+  }
+
+  return await parseImageResponse(res, finalPrompt, signal);
+}
+
+/**
+ * 探测：这个 API 到底转不转发 /images/edits。
+ *
+ * 故意发一张 1x1 的小图 —— 只为看端点在不在，不为出图。返回 'ok' 说明真出了图；
+ * 'unsupported' 说明端点不存在（中转站没代理）；'error' 是别的失败（额度 / 鉴权 /
+ * 尺寸不合法之类），这类不能算「不支持」，否则用户会以为功能用不了而放弃。
+ */
+export async function probeReferenceSupport(
+  cfg: ImageGenApiConfig,
+  signal?: AbortSignal,
+): Promise<{ status: 'ok' | 'unsupported' | 'error'; detail: string }> {
+  if (!isImageGenConfigured(cfg)) return { status: 'error', detail: '生图 API 没配全' };
+  // 1x1 透明 PNG
+  const tiny = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
+  try {
+    await generateImage('a small red dot', cfg, { referenceImage: tiny, signal });
+    return { status: 'ok', detail: '支持参考图，锁脸可用' };
+  } catch (e: any) {
+    if (e?.name === 'ReferenceUnsupportedError') {
+      return { status: 'unsupported', detail: e.message };
+    }
+    return { status: 'error', detail: e?.message || String(e) };
+  }
 }

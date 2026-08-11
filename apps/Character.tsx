@@ -419,6 +419,42 @@ const Character: React.FC = () => {
       handleChange('activeMemoryMonths', next);
   };
 
+  // ── 锁脸参考图 ──
+  // 存进角色档案的是 data URL（跟头像同一套）。压到 1024px：/images/edits 要把它整张
+  // 上传上去，原图动辄几 MB，既拖慢每次自拍也把 IndexedDB 和备份包撑大。
+  const faceRefInputRef = useRef<HTMLInputElement>(null);
+  const [showFacePicker, setShowFacePicker] = useState(false);
+  const [galleryPicks, setGalleryPicks] = useState<{ id: string; url: string }[]>([]);
+
+  const handleFaceRefUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+      const file = e.target.files?.[0];
+      if (!file || !formData) return;
+      try {
+          setIsCompressing(true);
+          const dataUrl = await processImage(file, { maxWidth: 1024, quality: 0.9, forceJpeg: true });
+          handleChange('imageGen', { ...(formData.imageGen || {}), faceRef: dataUrl });
+          addToast('锁脸参考图已设置', 'success');
+      } catch (error: any) {
+          addToast(error.message || '图片处理失败', 'error');
+      } finally {
+          setIsCompressing(false);
+          if (faceRefInputRef.current) faceRefInputRef.current.value = '';
+      }
+  };
+
+  // 从相册挑一张角色自己生成过的图当参考 —— 角色发过的自拍会带 charId 存进相册，
+  // 所以这里天然就是「它自己的照片」，比让用户去文件夹里翻靠谱。
+  const openFacePicker = async () => {
+      if (!formData) return;
+      try {
+          const imgs = await DB.getGalleryImages(formData.id);
+          setGalleryPicks(imgs.filter(i => !!i.url).slice(-40).reverse().map(i => ({ id: i.id, url: i.url })));
+          setShowFacePicker(true);
+      } catch (e: any) {
+          addToast('读取相册失败：' + (e?.message || e), 'error');
+      }
+  };
+
   const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
       const file = e.target.files?.[0];
       if (file) {
@@ -1443,6 +1479,62 @@ ${isInitialGeneration ? `
                                        出的图不满意就点「随机一个」换张脸。
                                    </p>
                                </div>
+
+                               {/* 锁脸参考图：走 /images/edits，比纯文字描述强一个量级。
+                                   不是所有服务商都代理那个端点，用不了时会自动回落到纯文字。 */}
+                               <div className="border-t border-slate-100 pt-3">
+                                   <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1.5 block">锁脸参考图（最强的一致性）</label>
+                                   <div className="flex gap-3 items-start">
+                                       <div className="w-20 h-20 rounded-2xl bg-slate-50 border border-slate-200 shrink-0 overflow-hidden flex items-center justify-center">
+                                           {formData.imageGen?.faceRef ? (
+                                               <img src={formData.imageGen.faceRef} alt="锁脸参考" className="w-full h-full object-cover" />
+                                           ) : (
+                                               <span className="text-[10px] text-slate-300 text-center leading-tight px-1">未设置</span>
+                                           )}
+                                       </div>
+                                       <div className="flex-1 min-w-0 space-y-2">
+                                           <div className="flex gap-2 flex-wrap">
+                                               <button
+                                                   type="button"
+                                                   onClick={() => faceRefInputRef.current?.click()}
+                                                   disabled={isCompressing}
+                                                   className="px-3 py-2 rounded-xl bg-pink-50 text-pink-600 text-xs font-bold active:scale-95 transition-transform disabled:opacity-50"
+                                               >
+                                                   {isCompressing ? '处理中…' : '上传照片'}
+                                               </button>
+                                               <button
+                                                   type="button"
+                                                   onClick={openFacePicker}
+                                                   className="px-3 py-2 rounded-xl bg-slate-100 text-slate-600 text-xs font-bold active:scale-95 transition-transform"
+                                               >
+                                                   从相册选
+                                               </button>
+                                               {formData.imageGen?.faceRef && (
+                                                   <button
+                                                       type="button"
+                                                       onClick={() => handleChange('imageGen', { ...(formData.imageGen || {}), faceRef: undefined })}
+                                                       className="px-3 py-2 rounded-xl bg-rose-50 text-rose-500 text-xs font-bold active:scale-95 transition-transform"
+                                                   >
+                                                       清除
+                                                   </button>
+                                               )}
+                                           </div>
+                                           <input ref={faceRefInputRef} type="file" accept="image/*" onChange={handleFaceRefUpload} className="hidden" />
+                                           <p className="text-[10px] text-slate-400 leading-relaxed">
+                                               放一张这个角色的<span className="font-semibold text-slate-500">正脸照</span>，之后的自拍会照着它画。
+                                               「从相册选」可以直接挑 TA 之前自己生成过的图。
+                                           </p>
+                                       </div>
+                                   </div>
+                                   <p className="text-[10px] text-amber-600 bg-amber-50 rounded-lg px-2.5 py-1.5 mt-2 leading-relaxed">
+                                       只放虚拟角色的脸。<span className="font-semibold">不要放真人照片</span>——拿真实存在的人的脸去生成图片是另一回事，
+                                       尤其这个站是公开的。
+                                   </p>
+                                   <p className="text-[10px] text-slate-400 mt-1.5 leading-relaxed">
+                                       需要你的生图 API 支持 <span className="font-mono text-slate-500">/images/edits</span>（去「设置 → 生图 API」点「测试生图」能探到）。
+                                       不支持时会自动回落到纯文字，不影响原来的出图。
+                                   </p>
+                               </div>
                            </div>
 
                            {/* 时间感知 & 时区：三个独立开关，可任意组合（聊天时间感知 / 自定义时区 / 线下时间感知） */}
@@ -1780,6 +1872,33 @@ ${isInitialGeneration ? `
                }}
            />
        )}
+
+       {/* 锁脸参考图 · 从相册挑一张（优先挑角色自己生成过的自拍） */}
+       <Modal isOpen={showFacePicker} title="选一张锁脸参考图" onClose={() => setShowFacePicker(false)}>
+           {galleryPicks.length === 0 ? (
+               <p className="text-xs text-slate-400 leading-relaxed py-6 text-center">
+                   这个角色的相册还是空的。<br />
+                   等 TA 自己发过图之后，这里就能直接挑；也可以先用「上传照片」。
+               </p>
+           ) : (
+               <div className="grid grid-cols-3 gap-2 max-h-[50vh] overflow-y-auto vr-reader-scroll">
+                   {galleryPicks.map(g => (
+                       <button
+                           key={g.id}
+                           type="button"
+                           onClick={() => {
+                               handleChange('imageGen', { ...(formData?.imageGen || {}), faceRef: g.url });
+                               setShowFacePicker(false);
+                               addToast('锁脸参考图已设置', 'success');
+                           }}
+                           className="aspect-square rounded-xl overflow-hidden border-2 border-transparent hover:border-pink-300 active:scale-95 transition-all"
+                       >
+                           <img src={g.url} alt="" className="w-full h-full object-cover" loading="lazy" />
+                       </button>
+                   ))}
+               </div>
+           )}
+       </Modal>
 
        {/* Modals ... */}
        <Modal isOpen={showImportModal} title="记忆导入/清洗" onClose={() => setShowImportModal(false)} footer={<><button onClick={() => setShowImportModal(false)} className="flex-1 py-3 bg-slate-100 text-slate-500 font-bold rounded-2xl">取消</button><button onClick={handleImportMemories} disabled={isProcessingMemory || importLengthInfo.overLimit} className={`flex-1 py-3 text-white font-bold rounded-2xl shadow-lg flex items-center justify-center gap-2 ${importLengthInfo.overLimit ? 'bg-slate-300 cursor-not-allowed shadow-none' : 'bg-primary shadow-primary/30'}`}>{isProcessingMemory && <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin"></div>}{isProcessingMemory ? '处理中...' : importLengthInfo.overLimit ? '请先分批' : '开始执行'}</button></>}>

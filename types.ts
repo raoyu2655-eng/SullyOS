@@ -2711,6 +2711,17 @@ export interface CharacterProfile {
      * SD 系（Flux / Kolors / 各中转站）认它；DALL·E 3 不认，填了也没用。
      */
     seed?: number;
+    /**
+     * 「锁脸」参考图（data URL）—— 一张这个角色的正脸照，之后的自拍照着它画。
+     *
+     * 这是比 appearance + seed 更强的一层：文字只能说「银发红瞳」，模型每次自己
+     * 想象一张脸；参考图是真的看着同一张脸画。走 `/images/edits` 端点，
+     * 不是所有服务商都代理（见 imageGenApi.probeReferenceSupport），
+     * 用不了时自动回落到纯文字，不会把原本能出的图弄没。
+     *
+     * 只该放虚拟角色的脸。真人照片不要放这里。
+     */
+    faceRef?: string;
   };
   /** 角色分组：指向 CharacterGroup.id；空或指向已删分组 = 未分组。仅本地组织用，不随角色卡导出 */
   groupId?: string;

@@ -42,7 +42,7 @@ import {
 } from '../utils/avatarModelBackup';
 import { normalizeApiBaseUrl, normalizeApiCredential, normalizeApiModel } from '../utils/apiConfigNormalize';
 import { describeImageWithVisionApi, VISION_API_TEST_IMAGE_DATA_URL, visionApiConfigFromPreset } from '../utils/visionApi';
-import { generateImage, IMAGE_SIZE_PRESETS } from '../utils/imageGenApi';
+import { generateImage, probeReferenceSupport, IMAGE_SIZE_PRESETS } from '../utils/imageGenApi';
 import type { ImageGenApiConfig } from '../types';
 
 // hot_news（news.orz.ai）可选热榜平台。key 必须与 API 的 ?platform= 完全一致。
@@ -1125,11 +1125,23 @@ const Settings: React.FC = () => {
     setImgGenTestResult(null);
     try {
       const result = await generateImage('a cute cat sitting on a windowsill, soft morning light', cfg);
+      // 出图通了再顺手探一次「锁脸」——即 /images/edits 这个端点在不在。
+      // 很多中转站只代理了 /images/generations，用户配好了才发现锁脸是空的。
+      // 探测失败不影响主结论：这一步只是补充信息。
+      let refNote = '';
+      try {
+        const probe = await probeReferenceSupport(cfg);
+        refNote = probe.status === 'ok'
+          ? '｜🔒 锁脸可用（支持参考图）'
+          : probe.status === 'unsupported'
+            ? '｜⚠️ 不支持锁脸：这个 API 没有 /images/edits，角色自拍只能靠文字描述'
+            : `｜锁脸探测未完成：${probe.detail.slice(0, 60)}`;
+      } catch { /* 探测本身出错不算数 */ }
       setImgGenTestResult({
         ok: true,
-        msg: result.isRemoteUrl
+        msg: (result.isRemoteUrl
           ? '出图成功，但图片是以链接形式存的（跨域抓不回来），聊天记录里的图日后可能失效——建议把「返回格式」改成 b64_json'
-          : `出图成功（${cfg.size || '服务端默认尺寸'}）`,
+          : `出图成功（${cfg.size || '服务端默认尺寸'}）`) + refNote,
         preview: result.content,
       });
       trackEvent('测试生图 API', { result: '成功' });

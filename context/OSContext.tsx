@@ -2405,9 +2405,22 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
                           return;
                       }
                       try {
-                          const result = await generateImage(imgPrompt, imgCfg!, {
-                              ...(asSelfie && typeof imgSeed === 'number' ? { seed: imgSeed } : {}),
-                          });
+                          // 与 applyAssistantPostProcessing 同款：锁脸参考图只给自拍用，
+                          // 服务商不支持 /images/edits 时安静回落到纯文字。
+                          const faceRef = asSelfie ? (char.imageGen?.faceRef || '').trim() : '';
+                          const genOpts = { ...(asSelfie && typeof imgSeed === 'number' ? { seed: imgSeed } : {}) };
+                          let result;
+                          if (faceRef) {
+                              try {
+                                  result = await generateImage(imgPrompt, imgCfg!, { ...genOpts, referenceImage: faceRef });
+                              } catch (refErr: any) {
+                                  if (refErr?.name !== 'ReferenceUnsupportedError') throw refErr;
+                                  console.warn('[ImageGen/Proactive] 不支持参考图，回落纯文字:', refErr.message);
+                                  result = await generateImage(imgPrompt, imgCfg!, genOpts);
+                              }
+                          } else {
+                              result = await generateImage(imgPrompt, imgCfg!, genOpts);
+                          }
                           await DB.saveMessage({
                               charId,
                               role: 'assistant',

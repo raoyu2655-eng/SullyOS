@@ -31,7 +31,7 @@ const makeChar = (over: Partial<CharacterProfile> = {}): CharacterProfile => ({
   ...over,
 } as CharacterProfile);
 
-const userProfile = { name: '裴老师', persona: '' } as UserProfile;
+const userProfile = { name: '裴老师', persona: '' } as unknown as UserProfile;
 
 const buildStable = async (char: CharacterProfile): Promise<string> => {
   const parts = await ChatPrompts.buildSystemPromptParts(
