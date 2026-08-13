@@ -438,6 +438,16 @@ export interface OutboxDrainResult {
   ackNow: string[];
   /** 这一趟从账本上读到的全部条目。调用方按轮次下结论时要看它。 */
   entries: AmsgOutboxEntry[];
+  /**
+   * 这一趟走的是不是「首次接管」那条路（见 adoptOutboxBacklog）。
+   *
+   * 只为排障：接管趟会把非等待中的条目整批销账、永不入流，而它一辈子只发生一次。
+   * 「补收明明跑了、消息就是不出现」时，这一位直接分开「被当存量扔了」和「捡回来了
+   * 但后面丢了」两种解释——否则要靠反复复现去猜，而它已经不会再复现了。
+   */
+  adopted: boolean;
+  /** 首次接管时被当存量销掉的条数；非接管趟恒为 0。 */
+  backlogAcked: number;
 }
 
 /**
@@ -491,14 +501,14 @@ const adoptOutboxBacklog = async (entries: AmsgOutboxEntry[]): Promise<OutboxDra
       await ActiveMsgClient.ackOutboxMessages(backlogIds);
     } catch (error) {
       console.warn(`${HEADER} 账本存量没销干净，这一趟先不接管（下次重来）`, error);
-      return { written: 0, ackNow: [], entries };
+      return { written: 0, ackNow: [], entries, adopted: false, backlogAcked: 0 };
     }
   }
   markOutboxAdopted();
   console.log(`${HEADER} 第一次接上云端账本：存量 ${backlogIds.length} 条直接销账，不往聊天流里放`);
 
   const { written, ackNow } = await backfillOutboxEntries(entries.filter(isAwaited));
-  return { written, ackNow, entries };
+  return { written, ackNow, entries, adopted: true, backlogAcked: backlogIds.length };
 };
 
 /**
@@ -510,7 +520,7 @@ const adoptOutboxBacklog = async (entries: AmsgOutboxEntry[]): Promise<OutboxDra
  */
 const backfillOutboxEntries = async (
   entries: AmsgOutboxEntry[],
-): Promise<Omit<OutboxDrainResult, 'entries'>> => {
+): Promise<Pick<OutboxDrainResult, 'written' | 'ackNow'>> => {
   const now = Date.now();
   const ackNow: string[] = [];
   let written = 0;
@@ -565,7 +575,7 @@ export const drainOutbox = async (): Promise<OutboxDrainResult> => {
   const entries = await ActiveMsgClient.listOutboxEntries();
   if (!hasAdoptedOutbox()) return await adoptOutboxBacklog(entries);
   const { written, ackNow } = await backfillOutboxEntries(entries);
-  return { written, ackNow, entries };
+  return { written, ackNow, entries, adopted: false, backlogAcked: 0 };
 };
 
 /**

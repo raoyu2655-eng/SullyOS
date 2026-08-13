@@ -1951,7 +1951,23 @@ const backfillReasoningSafely = async (sessionId?: string, charId?: string): Pro
  */
 const drainOutboxAndFlush = async (): Promise<AmsgOutboxEntry[] | null> => {
   try {
-    const { written, ackNow, entries } = await drainOutbox();
+    const { written, ackNow, entries, adopted, backlogAcked } = await drainOutbox();
+    // 排障用的一行流水（勾了「即时推送」那类才进调试面板，没勾时只有 F12 能看到）。
+    //
+    // 「灯亮着、补收也跑了、消息就是不出现」这个坏法，光看外部现象分不出是哪一档：
+    // 账本上压根没这条 / 被首次接管当存量销掉了 / 捡回来了但冲刷那侧丢了。这一行把
+    // 三者的判据一次摆齐——轮次 id 是为了对「账本上这条属于哪一轮」和「你正等着哪一轮」，
+    // 它们对不上正是存量销账那条路的成因。只有 id 和计数，不含消息正文。
+    log.info('补收拉了一趟', {
+      拉到: entries.length,
+      写进收件箱: written,
+      当场销账: ackNow.length,
+      首次接管: adopted,
+      当存量销掉: backlogAcked,
+      账本轮次: entries.map((entry) => entry.taskUuid ?? '—'),
+      账本类型: entries.map((entry) => (entry.push as any)?.messageKind ?? 'content'),
+      正等着的轮次: listInstantChatPendings().map((pending) => pending.uuid),
+    });
     // 不打算走聊天流的那些当场销账，免得每趟都把它们捞回来。纯收尾，不 await。
     if (ackNow.length > 0) {
       void ActiveMsgClient.ackOutboxMessages(ackNow).catch((e) => {
