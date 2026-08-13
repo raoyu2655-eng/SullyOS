@@ -1221,6 +1221,97 @@ describe('ActiveMsgClient.ensurePushSubscription（① 不再无条件复用旧�
   });
 });
 
+// 回归守卫（⑦）：iOS 主屏 Web App 关掉之后系统会把 push 订阅连同 App 一起回收——权限还是
+// granted、SW 还是 activated，只有 getSubscription() 变成 null。没有自愈的话，用户每次开
+// App 都得手动点一次「开启通知与推送」（真实故障，2026-08 复现于 iOS Chrome + pages.dev）。
+// 这一组同时钉住反面：没开过推送的人这里必须一动不动。
+describe('ActiveMsgClient.healPushSubscription（⑦ 订阅被系统回收后自愈）', () => {
+  const HEALED_ENDPOINT = 'https://fcm.googleapis.com/send/healed';
+
+  /** 装一套「权限已给、SW 已活」的环境，existing 为 null 即模拟订阅被回收。 */
+  const stubHealEnv = (existing: any) => {
+    const subscribe = vi.fn().mockResolvedValue({
+      endpoint: HEALED_ENDPOINT,
+      options: { applicationServerKey: Uint8Array.from([1, 2, 3]).buffer },
+      unsubscribe: vi.fn().mockResolvedValue(true),
+      toJSON: () => ({ endpoint: HEALED_ENDPOINT, keys: { p256dh: 'p', auth: 'a' } }),
+    });
+    vi.stubGlobal('navigator', {
+      serviceWorker: {
+        ready: Promise.resolve({
+          pushManager: { getSubscription: vi.fn().mockResolvedValue(existing), subscribe },
+        }),
+      },
+    });
+    vi.stubGlobal('window', { PushManager: class {} });
+    vi.stubGlobal('Notification', { permission: 'granted' });
+    return subscribe;
+  };
+
+  /** 改这一轮 getGlobalConfig 的返回值（模块级 mock 是死的，按用例换）。 */
+  const withConfig = async (extra: Record<string, unknown>) => {
+    const { ActiveMsgStore } = await import('./activeMsgStore');
+    (ActiveMsgStore as any).getGlobalConfig = async () => ({
+      userId: TEST_USER_ID,
+      workerUrl: 'https://amsg.example.workers.dev',
+      serverToken: '',
+      ...extra,
+    });
+  };
+
+  beforeEach(async () => {
+    reiClient.init.mockReset().mockResolvedValue(undefined);
+    reiClient.getVapidPublicKey.mockReset().mockResolvedValue(VAPID_AQID);
+    reiClient.putPushSubscription.mockReset().mockResolvedValue({ success: true, data: { updatedAt: 1 } });
+    await withConfig({ pushOptedInAt: 1 });
+  });
+  afterEach(async () => {
+    vi.unstubAllGlobals();
+    await withConfig({});
+  });
+
+  it('开过推送 + 订阅没了 → 重建并登记回 worker', async () => {
+    const subscribe = stubHealEnv(null);
+
+    await expect(runWithTimers(ActiveMsgClient.healPushSubscription())).resolves.toBe('healed');
+    expect(subscribe).toHaveBeenCalledTimes(1);
+    // 只重建浏览器订阅不登记的话，worker 上还是旧端点，到点照样推到没人接的地方。
+    expect(reiClient.putPushSubscription).toHaveBeenCalledTimes(1);
+  });
+
+  it('没开过推送（pushOptedInAt 为空）→ 一动不动，不替用户开推送', async () => {
+    await withConfig({});
+    const subscribe = stubHealEnv(null);
+
+    await expect(ActiveMsgClient.healPushSubscription()).resolves.toBe('skipped');
+    expect(subscribe).not.toHaveBeenCalled();
+    expect(reiClient.putPushSubscription).not.toHaveBeenCalled();
+  });
+
+  it('订阅还在 → 跳过，不多打一次登记请求', async () => {
+    const healthy = makeSub('https://fcm.googleapis.com/send/x', [1, 2, 3]);
+    stubHealEnv(healthy);
+
+    await expect(ActiveMsgClient.healPushSubscription()).resolves.toBe('skipped');
+    expect(reiClient.putPushSubscription).not.toHaveBeenCalled();
+  });
+
+  it('权限已经不是 granted → 跳过（那是用户自己关的，重建会弹框）', async () => {
+    const subscribe = stubHealEnv(null);
+    vi.stubGlobal('Notification', { permission: 'default' });
+
+    await expect(ActiveMsgClient.healPushSubscription()).resolves.toBe('skipped');
+    expect(subscribe).not.toHaveBeenCalled();
+  });
+
+  it('重建失败 → 返回 failed，绝不往外抛（不能拦住启动）', async () => {
+    stubHealEnv(null);
+    reiClient.putPushSubscription.mockRejectedValue(new Error('worker down'));
+
+    await expect(runWithTimers(ActiveMsgClient.healPushSubscription())).resolves.toBe('failed');
+  });
+});
+
 // ─── ②③ 共用的角色/任务夹具 ───
 const FUTURE_ISO = () => new Date(Date.now() + 3600_000).toISOString();
 const PAST_ISO = () => new Date(Date.now() - 24 * 3600_000).toISOString();

@@ -364,6 +364,13 @@ export interface ActiveMsg2GlobalConfig {
   /** 上次「连接」（在 worker 端建表）成功的时间 */
   initializedAt?: number;
   /**
+   * 用户最后一次成功「开启通知与推送」的时间。
+   *
+   * 只用来区分两件长得一模一样的事：「还没开过推送」和「开过、但订阅被浏览器回收了」。
+   * 后者启动时静默重建（见 ActiveMsgClient.healPushSubscription），前者一个指头都不碰。
+   */
+  pushOptedInAt?: number;
+  /**
    * 即时对话：聊天的每一轮都交给云端跑（POST /instant-chat），回复走推送回来。
    * 只在设置页那一处开关（开关本身还有连接 / 通知权限 / worker 能力三道门），
    * 关掉就是现在的本地直连生成。

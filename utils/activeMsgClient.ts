@@ -1210,6 +1210,20 @@ const subscribeOrThrow = async (
   throw withFailKind(new Error(message), failure ? SUBSCRIBE_FAIL_KIND[failure.kind] : '订阅失败');
 };
 
+/**
+ * 记下「推送在这台设备上被开起来过」，给启动自愈当凭据（见 healPushSubscription）。
+ *
+ * 写不进去只是下次启动少一次自愈机会，推送本身已经配好了——所以一律不外抛，
+ * 否则「开启成功」会被一句存储失败改判成失败。
+ */
+const markPushOptedIn = async (): Promise<void> => {
+  try {
+    await ActiveMsgStore.saveGlobalConfig({ pushOptedInAt: Date.now() });
+  } catch (error) {
+    console.warn('[ActiveMsg] 记录推送开启时间失败，自愈会少一次机会', error);
+  }
+};
+
 /** 重置的公共尾段：拿 worker 的 VAPID → 重新订阅 → 覆盖登记回 worker。 */
 const resubscribeAndRegister = async (client: ReiClient): Promise<void> => {
   const vapidPublicKey = await fetchWorkerVapidKey(client);
@@ -1221,6 +1235,9 @@ const resubscribeAndRegister = async (client: ReiClient): Promise<void> => {
   } catch (error) {
     throw normalizeActiveMsgApiError(error, '登记推送订阅');
   }
+  // 「重置订阅」跟「开启通知与推送」一样是用户亲手把推送开起来，凭据同样要记上，
+  // 否则靠重置修好的人下次启动照样不自愈。
+  await markPushOptedIn();
 };
 
 /**
@@ -1426,6 +1443,9 @@ export const ActiveMsgClient = {
     } catch (error) {
       throw normalizeActiveMsgApiError(error, '登记推送订阅');
     }
+    // 放在登记成功之后写：只建了浏览器订阅、没登记上云端的那种半成品不算开过，
+    // 自愈重建它也没有意义。
+    await markPushOptedIn();
   },
 
   /**
@@ -1571,6 +1591,51 @@ export const ActiveMsgClient = {
       // init-tenant 过了、鉴权也通了，连接本身是成功的，这里不能往外抛：否则用户
       // 会被指去改一堆根本没错的配置。补不上就等排程那步（scheduleTask 也会登记）。
       console.warn('[ActiveMsg] 连接后补登记推送订阅失败', error);
+      return 'failed';
+    }
+  },
+
+  /**
+   * 启动自愈：开过推送、权限还在、SW 也活着，但浏览器把订阅单独回收了 → 静默重建。
+   *
+   * iOS 的主屏 Web App 上这是常态：App 一关，系统连着 push 订阅一起回收，
+   * `Notification.permission` 还是 granted、SW 还是 activated，只有 `getSubscription()`
+   * 变成 null。表现是每次开 App 都得手动点一次「开启通知与推送」——而那一步在权限
+   * 已经授予的前提下本来就不需要用户参与，纯粹是没人替他重建。
+   *
+   * 与 reconcilePushSubscription 的分工正好互补：那个只在**已有订阅**时补登记（连接
+   * 换 worker 用），这个只在**订阅没了**时重建。两个都不会替没开过推送的人申请权限。
+   *
+   * `pushOptedInAt` 就是「用户自己开过」的凭据。没有它一律跳过——第一次用的人在这里
+   * 什么都不该发生，行为跟改动前一模一样。
+   *
+   * 返回值只为单测断言：'skipped' 不需要/不该动；'healed' 重建并登记成功；'failed' 没修成。
+   */
+  async healPushSubscription(): Promise<'skipped' | 'healed' | 'failed'> {
+    try {
+      if (describePushCapabilityGap()) return 'skipped';
+      // 权限没了就不是「订阅被回收」而是用户自己关的，重建会弹权限框——那得他自己来。
+      if (Notification.permission !== 'granted') return 'skipped';
+
+      const config = await ensureGlobalReady();
+      if (!config.workerUrl.trim()) return 'skipped';
+      if (!config.pushOptedInAt) return 'skipped';
+
+      await KeepAlive.init();
+      const registration = await navigator.serviceWorker.ready;
+      // 已经有订阅就到此为止：这里只补「订阅没了」这一个洞，不顺手多打一次登记请求。
+      if (await registration.pushManager.getSubscription()) return 'skipped';
+    } catch {
+      // 探测本身炸了（SW 没就绪 / 存储读不出来）就算了，别为一句自检拦住启动。
+      return 'skipped';
+    }
+
+    try {
+      await this.registerPushSubscription();
+      return 'healed';
+    } catch (error) {
+      // 修不成也不能打断启动。下次开 App 再试一次，代价只是这一轮照旧要手动开。
+      console.warn('[ActiveMsg] 推送订阅自愈失败，下次启动再试', error);
       return 'failed';
     }
   },

@@ -2350,7 +2350,19 @@ export const ActiveMsgRuntime = {
     // 订阅自检兜底：后台期间 SW 收到 pushsubscriptionchange 写了标记、而通知丢失
     // （页面没开着）时，启动这里把它消费掉。fire-and-forget——它要打网络请求，
     // 不能拦着下面的 inbox flush。
-    void refreshPushSubscriptionIfMarked();
+    //
+    // 紧接着补一次自愈：iOS 主屏 Web App 关掉之后，系统会把 push 订阅连同 App 一起
+    // 回收，权限和 SW 都还在、只有订阅没了，不补的话用户每次开 App 都得手动点一次
+    // 「开启通知与推送」。串在标记消费之后跑，不并发——两边都会 subscribe()，同时
+    // 动手会撞进浏览器退订后的哨兵窗口，白白多绕一轮重试。
+    void (async () => {
+      await refreshPushSubscriptionIfMarked();
+      if (await ActiveMsgClient.healPushSubscription() === 'failed') {
+        // 只报「发生了」。修不成意味着这台设备之后所有到点推送都石沉大海，而用户
+        // 这侧看不到任何异常（跟自检失败同一种坏法），不主动收就永远不知道有多少人卡在这。
+        trackEvent('2.0推送订阅自愈失败');
+      }
+    })().catch((error) => log.warn('推送订阅启动自检出错', { error }));
 
     // 启动兜底: 先 flush 落库 (含上次被杀进程时卡在 inbox 的 round-1 旁白), 再跑 runner
     // 触发 round-2, 保证冷启动恢复时旁白也排在 round-2 回复之前.
