@@ -32,6 +32,12 @@ function calling（例如携带 `tools` 就报 401），关闭它后首轮会直
 | **直连**（代理 URL 留空） | 服务器 CORS 配置正确 | 什么都不用做 |
 | **本地代理** | 本地 MCP（如 xiaohongshu-mcp）、或临时试用 | `node scripts/mcp-proxy.mjs`，代理 URL 填 `http://localhost:18061` |
 | **自己的 Cloudflare Worker** | 云端 MCP + 手机/不想在电脑跑东西 | 部署 [`worker/mcp-proxy/`](../worker/mcp-proxy/README.md) 到**自己的** CF 账号，代理 URL 填 Worker 地址，建议设 `PROXY_KEY` 防白嫖 |
+| **本站的 Pages Function**（推荐，站点部署在 Pages 上时） | 同上，且 `*.workers.dev` 连不上（国内常见） | 什么都不用部署，代理 URL 填 `https://<你的站>/mcp-proxy`。实现见 [`functions/mcp-proxy.ts`](../functions/mcp-proxy.ts)，防白嫖密钥的环境变量名是 `MCP_PROXY_KEY` |
+
+第四条跟 `functions/amsg/[[path]].ts` 是同一个思路：用户既然打得开这个站，这个域名对他
+就是可达的，不用再赌 `*.workers.dev` 通不通，也不用多建一个 Worker。逻辑与 worker 版
+逐条对齐（同一份请求头白名单、同一套内网地址拦截），差别只有环境变量名和一个
+`?__health=1` 自检端点。
 
 代理约定统一为 `<代理URL>?target=<url-encoded 服务器URL>`（可选 `X-Proxy-Key` 头）。
 **刻意不走中心 sfworker**：MCP 流量含用户的 Bearer Token / 自定义鉴权头，不应该经过项目方服务器。

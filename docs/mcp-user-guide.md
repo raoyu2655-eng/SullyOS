@@ -75,14 +75,19 @@ Access-Control-Expose-Headers: Mcp-Session-Id
 
 补充开关「聊天模型支持工具调用」：默认开。若你的聊天模型或 API 中转不支持 function calling（症状：带 tools 参数就报错），关掉它走文字兼容模式；不关也有自动降级，只是多一次试探请求。
 
-## 四、连不上？CORS 代理二选一
+## 四、连不上？CORS 代理三选一
 
-「测试连接」报 `Failed to fetch`，基本都是服务器 CORS 没配好且你改不了它。SullyOS 仓库自带两个代理：
+「测试连接」报 `Failed to fetch` / `Load failed`，基本都是服务器 CORS 没配好且你改不了它。SullyOS 仓库自带三个代理：
 
 | 方式 | 适合 | 步骤 |
 |------|------|------|
-| **本地代理** | 本地 MCP、或临时试用 | 在 SullyOS 仓库目录跑 `node scripts/mcp-proxy.mjs`，「代理 URL」填 `http://localhost:18061` |
-| **自部署 Cloudflare Worker** | 云端 MCP + 手机使用 | 把仓库 `worker/mcp-proxy/worker.js` 粘到自己 CF 账号（Dashboard → Workers → Create → 粘贴 → Deploy），「代理 URL」填 Worker 地址；**建议设 `PROXY_KEY`** 环境变量防白嫖，同时在 SullyOS「代理密钥」里填同一个值 |
+| **本站自带**（最省事） | 站点部署在 Cloudflare Pages 上时；手机上唯一不用额外部署的选择 | 「代理 URL」直接填 `https://<你打开 SullyOS 的域名>/mcp-proxy`，不用部署任何东西。**想防白嫖**：在 Pages 项目 Settings → Environment variables 加一条 `MCP_PROXY_KEY`，再把同样的值填进「代理密钥」 |
+| **本地代理** | 本地 MCP、或临时试用 | 在 SullyOS 仓库目录跑 `node scripts/mcp-proxy.mjs`，「代理 URL」填 `http://localhost:18061`（手机上用不了：手机没有这个 localhost） |
+| **自部署 Cloudflare Worker** | 站点不在 Pages 上、或想让代理和站点分开 | 把仓库 `worker/mcp-proxy/worker.js` 粘到自己 CF 账号（Dashboard → Workers → Create → 粘贴 → Deploy），「代理 URL」填 Worker 地址；**建议设 `PROXY_KEY`** 环境变量防白嫖，同时在 SullyOS「代理密钥」里填同一个值 |
+
+> 第三条有个坑：Worker 的默认地址是 `*.workers.dev`，这个域名在国内经常连不上——部署成功了照样用不了。第一条正是为这个准备的，它跟你打开 SullyOS 用的是同一个域名，能打开站就能用。
+>
+> 想确认第一条有没有生效：浏览器直接打开 `https://<你的域名>/mcp-proxy?__health=1`，返回一小段 JSON 就是好的。
 
 代理只做透明转发 + 补 CORS 头，约定为 `<代理URL>?target=<服务器URL>`。刻意不提供公共代理：MCP 流量含你的 Token，不应经过项目方服务器。
 
