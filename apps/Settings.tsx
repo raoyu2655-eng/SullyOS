@@ -361,7 +361,9 @@ const McpServersCard: React.FC<{
                             </div>
                             {(server.proxyUrl || '').trim() && (
                                 <div>
-                                    <label className="text-[10px] font-bold text-slate-400 uppercase block mb-1">代理密钥（可选，自部署 Worker 的 PROXY_KEY）</label>
+                                    {/* 两种代理的变量名不一样（Worker 是 PROXY_KEY，本站 Pages 是 MCP_PROXY_KEY），
+                                        这里两个都写出来——只写一个的话，用另一种的人会照着去找一个不存在的变量。 */}
+                                    <label className="text-[10px] font-bold text-slate-400 uppercase block mb-1">代理密钥（可选：Worker 的 PROXY_KEY / 本站 /mcp-proxy 的 MCP_PROXY_KEY）</label>
                                     <input type="password" value={server.proxyKey || ''} onChange={e => update(server.id, { proxyKey: e.target.value.trim() })} className="w-full bg-white/80 border border-violet-200 rounded-xl px-3 py-2 text-sm font-mono" placeholder="没设就留空" />
                                 </div>
                             )}
