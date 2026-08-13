@@ -3200,6 +3200,37 @@ export interface DiaryEntry {
     autoSync?: boolean;
 }
 
+/**
+ * 角色独白 —— 他自己写下的那一页（设计与取舍见 plans/char-monologue.md）。
+ *
+ * 跟 DiaryEntry 的关系：那张表的每一行都假定「user 先写、角色再回」，userPage 是必填的。
+ * 这里是**没有 userPage 的那一种**：角色被什么触动了，自己写下对 user、对这段关系、
+ * 对别的角色最深的想法，允许负面、允许黑暗。所以单开一张表，不去给现存的读取路径
+ * 每一处都加判空。
+ *
+ * 两条不变量（拍板于 2026-08-13，改之前先读 plans 里的理由）：
+ *   1. **角色不知道这些被读过。** readAt 只服务于 UI 的未读点，任何 prompt 组装都不许读它。
+ *      角色一旦知道有人看，就开始为读者写作，写出来的就不再是最深的想法。
+ *   2. **不进每轮上下文，只进记忆宫殿。** 负面段落常驻 prompt 会把日常对话的语气整体带偏。
+ */
+export interface CharMonologueEntry {
+    id: string;
+    charId: string;
+    /** 日期 key，按**角色所在时区**算（见 docs/character-timezone.md，别用本机时区） */
+    date: string;
+    /** 正文，100–800 字 */
+    text: string;
+    /** 心境标签，模型自己给一个词；没给就不显示，不要替它编 */
+    mood?: string;
+    /** 触发这篇的那一刻：当时最后一条消息的 id，用来回答「他因为什么写的」 */
+    triggerMessageId?: number;
+    timestamp: number;
+    /** user 读过没有。**只给 UI 的未读点用**，绝不进 prompt（见上面第 1 条） */
+    readAt?: number;
+    /** 写进记忆宫殿的时刻；缺失 = 还没写成，可以重试 */
+    archivedAt?: number;
+}
+
 // ─── HANDBOOK / 手账 (跨角色聚合·零负担留痕本) ───
 //
 // 设计哲学（user 共识）:
