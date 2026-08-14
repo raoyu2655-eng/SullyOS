@@ -3,7 +3,7 @@
 
 import {
     CharacterProfile, ChatTheme, Message, UserProfile,
-    Task, Anniversary, DiaryEntry, RoomTodo, RoomNote, DailySchedule,
+    Task, Anniversary, DiaryEntry, CharMonologueEntry, RoomTodo, RoomNote, DailySchedule,
     GalleryImage, FullBackupData, GroupProfile, SocialPost, StudyCourse, GameSession, Worldbook, NovelBook, Emoji, EmojiCategory,
     BankTransaction, SavingsGoal, BankFullState, DollhouseState, XhsStockImage, XhsActivityRecord, SongSheet, QuizSession, GuidebookSession,
     LifeSimState, HandbookEntry, Tracker, TrackerEntry, HotNewsSnapshot,
@@ -26,7 +26,9 @@ const DB_NAME = 'AetherOS_Data';
 // v68：character_groups 角色分组（神经链接"文件夹"，见 types.ts CharacterGroup）。
 // v69：见面·剧情条目与糯米机原生预设。正文继续复用 messages 表，避免再造会话存储。
 // v70：剧场面具箱（原创人物面具）；角色面具仍只存 characterId，不复制神经链接资料。
-const DB_VERSION = 70;
+// v71：角色独白（他自己写下的那一页）。不并进 diaries：那张表每行都假定有 userPage，
+//      混进来会让所有现存读取路径都要多一道判空。设计见 plans/char-monologue.md。
+const DB_VERSION = 71;
 
 const STORE_CHARACTERS = 'characters';
 const STORE_CHAR_GROUPS = 'character_groups'; // 角色分组定义（角色通过 groupId 指向；与群聊 groups 无关）
@@ -40,6 +42,7 @@ const STORE_SCHEDULED = 'scheduled_messages';
 const STORE_GALLERY = 'gallery';
 const STORE_USER = 'user_profile'; 
 const STORE_DIARIES = 'diaries';
+const STORE_MONOLOGUES = 'char_monologues'; // 角色独白：没有 userPage 的那一种日记，角色自己写的（plans/char-monologue.md）
 const STORE_TASKS = 'tasks'; 
 const STORE_ANNIVERSARIES = 'anniversaries';
 const STORE_ROOM_TODOS = 'room_todos'; 
@@ -264,7 +267,14 @@ export const openDB = (): Promise<IDBDatabase> => {
           const diaryStore = db.createObjectStore(STORE_DIARIES, { keyPath: 'id' });
           diaryStore.createIndex('charId', 'charId', { unique: false });
       }
-      
+
+      // v71: 角色独白。索引跟 diaries 同款——列表永远是「某个角色的那些」，
+      // 没有跨角色一次性拉全表的场景（备份导出除外，那条走 getAll）。
+      if (!db.objectStoreNames.contains(STORE_MONOLOGUES)) {
+          const monologueStore = db.createObjectStore(STORE_MONOLOGUES, { keyPath: 'id' });
+          monologueStore.createIndex('charId', 'charId', { unique: false });
+      }
+
       createStore(STORE_TASKS, { keyPath: 'id' });
       createStore(STORE_ANNIVERSARIES, { keyPath: 'id' });
 
@@ -1503,6 +1513,85 @@ export const DB = {
       const db = await openDB();
       const transaction = db.transaction(STORE_DIARIES, 'readwrite');
       transaction.objectStore(STORE_DIARIES).delete(id);
+  },
+
+  // ─── 角色独白（plans/char-monologue.md）────────────────────────────────────
+  //
+  // 老库里没有这张表（v71 之前），所以每个读取口都先判 contains 再动手：
+  // 升级是在下一次 openDB 时做的，而这几个方法可能被更早的代码路径调到。
+
+  /** 某个角色的全部独白，新的在前（列表和防刷闸都按这个顺序读第一条）。 */
+  getMonologuesByCharId: async (charId: string): Promise<CharMonologueEntry[]> => {
+      const db = await openDB();
+      if (!db.objectStoreNames.contains(STORE_MONOLOGUES)) return [];
+      const rows = await new Promise<CharMonologueEntry[]>((resolve, reject) => {
+          const transaction = db.transaction(STORE_MONOLOGUES, 'readonly');
+          const index = transaction.objectStore(STORE_MONOLOGUES).index('charId');
+          const request = index.getAll(IDBKeyRange.only(charId));
+          request.onsuccess = () => resolve(request.result || []);
+          request.onerror = () => reject(request.error);
+      });
+      return rows.sort((a, b) => b.timestamp - a.timestamp);
+  },
+
+  /** 全量，只给备份导出用。 */
+  getAllMonologues: async (): Promise<CharMonologueEntry[]> => {
+      const db = await openDB();
+      if (!db.objectStoreNames.contains(STORE_MONOLOGUES)) return [];
+      return new Promise((resolve, reject) => {
+          const transaction = db.transaction(STORE_MONOLOGUES, 'readonly');
+          const request = transaction.objectStore(STORE_MONOLOGUES).getAll();
+          request.onsuccess = () => resolve(request.result || []);
+          request.onerror = () => reject(request.error);
+      });
+  },
+
+  /**
+   * 落一篇独白。**等事务真的提交完再返回**——防刷闸是读回上一篇的时间来判的，
+   * 写没落地就返回的话，同一轮里的第二次判定会看到一张还没更新的表。
+   */
+  saveMonologue: async (entry: CharMonologueEntry): Promise<void> => {
+      const db = await openDB();
+      if (!db.objectStoreNames.contains(STORE_MONOLOGUES)) return;
+      await new Promise<void>((resolve, reject) => {
+          const transaction = db.transaction(STORE_MONOLOGUES, 'readwrite');
+          transaction.objectStore(STORE_MONOLOGUES).put(entry);
+          transaction.oncomplete = () => resolve();
+          transaction.onerror = () => reject(transaction.error);
+          transaction.onabort = () => reject(transaction.error);
+      });
+  },
+
+  deleteMonologue: async (id: string): Promise<void> => {
+      const db = await openDB();
+      if (!db.objectStoreNames.contains(STORE_MONOLOGUES)) return;
+      const transaction = db.transaction(STORE_MONOLOGUES, 'readwrite');
+      transaction.objectStore(STORE_MONOLOGUES).delete(id);
+  },
+
+  /**
+   * 标记这篇被 user 读过。
+   *
+   * `readAt` **只服务于界面上的未读点**：角色那侧没有「被看过」这个概念，
+   * 任何 prompt 组装都不许读它（plans/char-monologue.md 的第一条不变量）。
+   * 单独开一个方法而不是让调用方 get + save，是为了让这个约束只有一个入口。
+   */
+  markMonologueRead: async (id: string, readAt = Date.now()): Promise<void> => {
+      const db = await openDB();
+      if (!db.objectStoreNames.contains(STORE_MONOLOGUES)) return;
+      await new Promise<void>((resolve, reject) => {
+          const transaction = db.transaction(STORE_MONOLOGUES, 'readwrite');
+          const store = transaction.objectStore(STORE_MONOLOGUES);
+          const getRequest = store.get(id);
+          getRequest.onsuccess = () => {
+              const row = getRequest.result as CharMonologueEntry | undefined;
+              // 已经读过就不覆盖时间：未读点只关心「读没读过」，第一次那一刻才有意义。
+              if (row && !row.readAt) store.put({ ...row, readAt });
+          };
+          transaction.oncomplete = () => resolve();
+          transaction.onerror = () => reject(transaction.error);
+          transaction.onabort = () => reject(transaction.error);
+      });
   },
 
   getAllTasks: async (): Promise<Task[]> => {
@@ -2837,7 +2926,7 @@ export const DB = {
           });
       };
 
-      const [characters, characterGroups, messages, themes, emojis, emojiCategories, assets, galleryImages, userProfiles, diaries, tasks, anniversaries, roomTodos, roomNotes, groups, journalStickers, socialPosts, courses, games, worldbooks, storyTheaters, storyTheaterPresets, storyTheaterMasks, novels, bankTx, bankData, xhsActivities, xhsStockImages, songs, quizzes, guidebookSessions, scheduledMessages, lifeSimStates, handbooks, trackers, trackerEntries, hotNewsSnapshots, vrNovels, vrAnnotations, customCreatorParts, vrMusic, vrGuestbook, vrScripts, vrStagedPlays, vrPresets, vrLetters, vrSettings, worlds, worldEpisodes, lifeRecords, medPlans, lifeRecordSettings] = await Promise.all([
+      const [characters, characterGroups, messages, themes, emojis, emojiCategories, assets, galleryImages, userProfiles, diaries, tasks, anniversaries, roomTodos, roomNotes, groups, journalStickers, socialPosts, courses, games, worldbooks, storyTheaters, storyTheaterPresets, storyTheaterMasks, novels, bankTx, bankData, xhsActivities, xhsStockImages, songs, quizzes, guidebookSessions, scheduledMessages, lifeSimStates, handbooks, trackers, trackerEntries, hotNewsSnapshots, vrNovels, vrAnnotations, customCreatorParts, vrMusic, vrGuestbook, vrScripts, vrStagedPlays, vrPresets, vrLetters, vrSettings, worlds, worldEpisodes, lifeRecords, medPlans, lifeRecordSettings, charMonologues] = await Promise.all([
           getAllFromStore(STORE_CHARACTERS),
           getAllFromStore(STORE_CHAR_GROUPS),
           getAllFromStore(STORE_MESSAGES),
@@ -2890,6 +2979,7 @@ export const DB = {
           getAllFromStore(STORE_LIFE_RECORDS),
           getAllFromStore(STORE_MED_PLANS),
           getAllFromStore(STORE_LIFE_SETTINGS),
+          getAllFromStore(STORE_MONOLOGUES),
       ]);
 
       const userProfile = userProfiles.length > 0 ? {
@@ -2902,7 +2992,7 @@ export const DB = {
       const dollhouseRecord = bankData.find((d: any) => d.id === 'dollhouse_state');
 
       return {
-          characters, characterGroups, messages, customThemes: themes, savedEmojis: emojis, emojiCategories, assets, galleryImages, userProfile, diaries, tasks, anniversaries, roomTodos, roomNotes, groups, savedJournalStickers: journalStickers, socialPosts, courses, games, worldbooks, storyTheaters, storyTheaterPresets, storyTheaterMasks, novels,
+          characters, characterGroups, messages, customThemes: themes, savedEmojis: emojis, emojiCategories, assets, galleryImages, userProfile, diaries, charMonologues, tasks, anniversaries, roomTodos, roomNotes, groups, savedJournalStickers: journalStickers, socialPosts, courses, games, worldbooks, storyTheaters, storyTheaterPresets, storyTheaterMasks, novels,
           bankState: mainState ? { ...mainState, id: undefined } : undefined,
           bankDollhouse: dollhouseRecord?.data || undefined,
           bankTransactions: bankTx,
@@ -3276,6 +3366,12 @@ export const DB = {
           await clearAndAdd(STORE_DIARIES, data.diaries, '日记', true);
           data.diaries = undefined as any;
       }, data.diaries?.length || 0);
+      // 独白单独一段：v71 之前导出的备份里没有这个键，那时按「这一段不存在」跳过，
+      // 不能顺手清空——否则拿旧备份恢复会把角色写过的独白全抹掉。
+      await runSection('角色独白', data.charMonologues !== undefined, async () => {
+          await clearAndAdd(STORE_MONOLOGUES, data.charMonologues, '角色独白', true);
+          data.charMonologues = undefined as any;
+      }, data.charMonologues?.length || 0);
       await runSection('任务', data.tasks !== undefined, async () => {
           await clearAndAdd(STORE_TASKS, data.tasks, '任务', false);
           data.tasks = undefined as any;

@@ -3799,6 +3799,8 @@ export interface FullBackupData {
     galleryImages?: GalleryImage[];
     userProfile?: UserProfile;
     diaries?: DiaryEntry[];
+    /** 角色独白。v71 前的备份没有这个键，恢复时按「这一段不存在」跳过，不清空现有的 */
+    charMonologues?: CharMonologueEntry[];
     tasks?: Task[];
     anniversaries?: Anniversary[];
     roomTodos?: RoomTodo[]; 
