@@ -1006,10 +1006,16 @@ ${voiceActingGuide()}`;
         // **闸关着就一个字都不注入**：模型不知道有这个标记，就刷不起来，也不用每轮白带
         // 三百多字。写完之后那道闸（judgeMonologueGate）照旧兜底，两层都在。
         //
-        // 不烤进 fire pack：「这一轮准不准写」是打包这一刻的状态，到触发时早就过期了
-        // （同上面 forFirePack 的口径）。即时对话那条路照常带——worker 立刻就生成，
-        // 这一刻的判定就是新鲜的。
-        if (!forFirePack) {
+        // 两条路都不注入：
+        //
+        // - forFirePack：「这一轮准不准写」是打包这一刻的状态，到触发时早就过期了。
+        // - timelyByWorker（即时对话）：**worker 不认识这个标记**。它的分类器里没有
+        //   MONOLOGUE，不会提取，然后把整段回复切成 N 条分别推过来——而 START...END 是
+        //   跨条的，客户端逐条后处理时正则永远匹配不到。结果就是那篇独白**原样当聊天发出去**
+        //   （2026-08-14 实际发生过：满屏第三人称的内心戏直接进了聊天流）。
+        //   要在这条路上支持，得先让 worker 侧认这个标记并结构化传回来（同 DIARY 那套
+        //   directive 通道），在那之前一个字都不许注入——不给机会比事后补救干净。
+        if (!forFirePack && !timelyByWorker) {
             try {
                 const existingMonologues = await DB.getMonologuesByCharId(char.id);
                 const monologueBlock = buildMonologuePromptBlock({
