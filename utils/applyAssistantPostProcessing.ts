@@ -31,6 +31,7 @@ import { ChatParser, type FrozenMusicSong } from './chatParser';
 import { resolveCharTimeZone } from './timezone';
 import { NotionManager, FeishuManager, XhsNote } from './realtimeContext';
 import { enqueuePendingDiary, removePendingDiary } from './pendingDiary';
+import { countMessagesSinceLast, writeMonologue } from './charMonologue';
 import { parseXhsCount, XhsMcpClient } from './xhsMcpClient';
 import { safeFetchJson } from './safeApi';
 import { extractHtmlBlocks } from './htmlPrompt';
@@ -1050,6 +1051,47 @@ export async function applyAssistantPostProcessing(
 
     aiContent = aiContent.replace(/\[\[DIARY:.*?\]\]/gs, '').trim();
     aiContent = aiContent.replace(/\[\[DIARY_START:.*?\]\][\s\S]*?\[\[DIARY_END\]\]/g, '').trim();
+
+    // 5.6b 角色独白（plans/char-monologue.md）
+    //
+    // 跟上面那个「写日记」是两回事：那个发去 Notion / 飞书，要用户配外部服务；这个是本地的，
+    // 落进交换日记，内容是他对 user、对这段关系、对身边人最深的想法。纯副作用，不重生、
+    // 不回灌给模型，标记整块从正文里剥掉——用户在聊天里看不到它。
+    //
+    // 闸拦下来时**什么都不做**：不落系统消息、不 toast。「他刚才想写但没写成」这件事
+    // 连角色自己都不知道，界面上冒出来就穿帮了（这跟上面 Notion 那段留提示的口径**相反**，
+    // 那里角色已经把「我去写日记了」说出口了，静默蒸发才是穿帮）。
+    const monologueMatch = aiContent.match(
+        /\[\[MONOLOGUE_START:\s*(.*?)\]\]\n?([\s\S]*?)\[\[MONOLOGUE_END\]\]/,
+    );
+    if (monologueMatch) {
+        const mood = monologueMatch[1]?.trim();
+        const text = monologueMatch[2]?.trim() || '';
+        try {
+            // 只在真的匹配到标记时才拉消息列表——这是全表读，不能每轮都做。
+            const charMessages = await DB.getMessagesByCharId(char.id);
+            const existing = await DB.getMonologuesByCharId(char.id);
+            const result = await writeMonologue({
+                char,
+                text,
+                mood,
+                triggerMessageId: charMessages[charMessages.length - 1]?.id,
+                messagesSinceLast: countMessagesSinceLast(charMessages, existing),
+            });
+            if (result.verdict === 'ok') {
+                if (result.lengthWarning) console.warn('📓 [Monologue]', result.lengthWarning);
+                console.log(`📓 [Monologue] ${char.name} 写了一篇独白`, { mood, chars: text.length });
+            } else {
+                console.log(`📓 [Monologue] 这一篇被闸拦下（${result.verdict}），静默丢弃`);
+            }
+        } catch (error) {
+            // 写不进去也只吞掉：这是一条纯副作用支线，不该让整轮回复跟着失败。
+            console.warn('📓 [Monologue] 落库失败，这一篇丢了', error);
+        }
+    }
+    // 无论写没写成，标记都要剥干净——包括闸拦下、落库失败、以及模型只吐了半个标记的情况。
+    aiContent = aiContent.replace(/\[\[MONOLOGUE_START:[\s\S]*?\[\[MONOLOGUE_END\]\]/g, '').trim();
+    aiContent = aiContent.replace(/\[\[MONOLOGUE_(?:START|END)[^\]]*\]\]/g, '').trim();
 
     // 5.7 Handle Read Diary (翻阅日记)
     const readDiaryMatch = aiContent.match(/\[\[READ_DIARY:\s*(.+?)\]\]/);

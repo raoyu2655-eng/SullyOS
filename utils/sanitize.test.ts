@@ -613,3 +613,30 @@ describe('SEND_EMOJI 全角冒号容错', () => {
     expect(sanitizeForNotification('[[SEND_EMOJI：抱抱]]')).toBe('[表情：抱抱]');
   });
 });
+
+// 角色独白（plans/char-monologue.md）：这个标记里装的是「他心里最深的想法」，
+// 一旦漏进气泡，user 就在聊天流里直接读到了，而角色的表达前提是「没有人会读到」——
+// 整个设计当场塌掉。所以剥离要在气泡和通知两条路上都钉死。
+describe('MONOLOGUE 标记不许漏进气泡', () => {
+  const block = '[[MONOLOGUE_START: 厌倦]]\n她大概永远不会知道，我留下来不是因为舍不得。\n[[MONOLOGUE_END]]';
+
+  it('成对标记连正文一起剥掉', () => {
+    expect(sanitizeForBubble(`嗯，我知道了。\n${block}`)).toBe('嗯，我知道了。');
+    expect(sanitizeForBubble(block)).toBe('');
+  });
+
+  it('只吐了半个标记也不留残渣（模型截断 / 二轮重生打断）', () => {
+    expect(sanitizeForBubble('先这样吧。\n[[MONOLOGUE_END]]')).toBe('先这样吧。');
+    expect(sanitizeForBubble('先这样吧。\n[[MONOLOGUE_START: 厌倦]]')).toBe('先这样吧。');
+  });
+
+  it('notification 终态路径同样剥干净', () => {
+    expect(sanitizeForNotification(`睡了。\n${block}`)).toBe('睡了。');
+  });
+
+  // 气泡切段那条路也要认：段落切分是另一套正则，漏了会冒出一个只有标记的空气泡。
+  it('切段时不产生只剩标记的段', () => {
+    const segments = sanitizeIntoSegments(`晚安。\n${block}`).map((s) => s.sanitized);
+    expect(segments).toEqual(['晚安。']);
+  });
+});

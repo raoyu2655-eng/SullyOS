@@ -54,6 +54,14 @@ const stripBusinessTagsForBubble = (t: string): string =>
     // 模型复读历史会抄出来。能还原成动作的 (记录:TRANSFER) 在上游 chatParser / worker classifier
     // 已被消费; 走到这里的一律是纯 leak, 不进气泡。全角冒号一并容 (模型手写变体)。
     // 对原版 chatParser.sanitize 是**有意**分叉 (C4 oracle 测的是 refactor 不漂移, 这条是新规则)。
+    // 角色独白（plans/char-monologue.md）：成对标记连正文一起剥，再兜一个落单的 END。
+    //
+    // 上面那条通用规则**吃不掉 END**——它要求标签名后面跟 `[:\s]`，而 `[[MONOLOGUE_END]]`
+    // 名字后面直接是 `]]`。`[[DIARY_END]]` 有同样的问题，历史上靠上游分支先剥干净兜住了；
+    // 这里不改那条通用规则（sanitize.test.ts 有字节对齐的 oracle 钉着它不许漂），
+    // 按「记录」命名空间那条的先例，另起一条新规则。
+    .replace(/\[\[MONOLOGUE_START[:\s][\s\S]*?\[\[MONOLOGUE_END\]\]/g, '')
+    .replace(/\[\[MONOLOGUE_(?:START|END)[^\]]*\]\]/g, '')
     .replace(/\[\[\s*[记記][录錄]\s*[:：][\s\S]*?\]\]/g, '')
     .replace(/\[schedule_message[^\]]*\]/g, '');
 

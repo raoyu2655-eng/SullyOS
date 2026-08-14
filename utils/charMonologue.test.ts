@@ -7,9 +7,23 @@
 import { describe, it, expect } from 'vitest';
 import {
   MIN_MESSAGES_SINCE_LAST, SOFT_MAX_CHARS, SOFT_MIN_CHARS,
-  countMessagesSinceLast, describeLengthDrift, judgeMonologueGate,
+  buildMonologuePromptBlock, countMessagesSinceLast, describeLastMonologueMoment,
+  describeLengthDrift, judgeMonologueGate,
 } from './charMonologue';
-import type { CharMonologueEntry } from '../types';
+import type { CharacterProfile, CharMonologueEntry } from '../types';
+
+/**
+ * 只用到 id / 自定义时区，其余不构造。
+ *
+ * 时区那两个字段必须成对（`customTimezoneEnabled` + `customTimezone`），
+ * 只填后者的话 resolveCharTimeZone 会回落到设备本地——这个夹具最早就写错在这儿。
+ */
+const makeChar = (customTimezone?: string): CharacterProfile => ({
+  id: 'char-1',
+  name: '季明熠',
+  customTimezoneEnabled: !!customTimezone,
+  customTimezone,
+} as unknown as CharacterProfile);
 
 const entry = (over: Partial<CharMonologueEntry> = {}): CharMonologueEntry => ({
   id: 'mono-1',
@@ -90,6 +104,85 @@ describe('describeLengthDrift（越界只警告，不截断）', () => {
   it('偏短 / 偏长 → 各给一句话，正文一个字都不动', () => {
     expect(describeLengthDrift('字'.repeat(SOFT_MIN_CHARS - 1))).toContain('低于');
     expect(describeLengthDrift('字'.repeat(SOFT_MAX_CHARS + 1))).toContain('超过');
+  });
+});
+
+describe('buildMonologuePromptBlock（闸关着就一个字都不注入）', () => {
+  const openArgs = { char: makeChar('Asia/Shanghai'), userName: '裴娆', messagesSinceLast: 999 };
+
+  it('今天已经写过 → null，模型根本不知道有这个功能', () => {
+    const block = buildMonologuePromptBlock({
+      ...openArgs,
+      existing: [entry({ date: '2026-08-14' })],
+      now: new Date('2026-08-14T06:00:00Z'), // 上海 14:00
+    });
+    expect(block).toBeNull();
+  });
+
+  it('有资格 → 给出成对标记的格式和用户名', () => {
+    const block = buildMonologuePromptBlock({ ...openArgs, existing: [] })!;
+    expect(block).toContain('[[MONOLOGUE_START:');
+    expect(block).toContain('[[MONOLOGUE_END]]');
+    expect(block).toContain('裴娆');
+    expect(block).not.toContain('上一次这样写是');
+  });
+
+  // 设计守卫：通篇不许出现「日记」二字。一说日记，模型就滑进「今天……我觉得……」
+  // 的流水账语域，写出来的正是这个功能要避开的东西。
+  it('措辞里不含「日记」', () => {
+    const block = buildMonologuePromptBlock({ ...openArgs, existing: [] })!;
+    expect(block).not.toContain('日记');
+  });
+
+  it('有上一篇 → 绝对时刻 + 相对天数 + 心境词都在', () => {
+    const block = buildMonologuePromptBlock({
+      ...openArgs,
+      existing: [entry({
+        date: '2026-08-10',
+        // 上海 2026-08-10 02:14
+        timestamp: Date.parse('2026-08-09T18:14:00Z'),
+        mood: '厌倦',
+      })],
+      now: new Date('2026-08-14T06:00:00Z'),
+    })!;
+    expect(block).toContain('8月10日');
+    expect(block).toContain('凌晨2:14');
+    expect(block).toContain('4 天前');
+    expect(block).toContain('「厌倦」');
+  });
+
+  // ⚠ 全套设计里最重要的一条不变量（plans/char-monologue.md）：角色不知道这些被读过。
+  // readAt 只服务于界面上的未读点，一旦漏进 prompt，角色就开始为读者写作，
+  // 写出来的就不再是最深的想法——这个功能的全部价值就没了。
+  it('上一篇读过没读过，注入的内容一模一样', () => {
+    const base = { ...openArgs, now: new Date('2026-08-14T06:00:00Z') };
+    const unread = buildMonologuePromptBlock({
+      ...base,
+      existing: [entry({ date: '2026-08-10', timestamp: 1_000, mood: '厌倦' })],
+    });
+    const read = buildMonologuePromptBlock({
+      ...base,
+      existing: [entry({ date: '2026-08-10', timestamp: 1_000, mood: '厌倦', readAt: Date.now() })],
+    });
+    expect(read).toBe(unread);
+  });
+});
+
+describe('describeLastMonologueMoment', () => {
+  it('同一天 → 就在今天', () => {
+    const moment = describeLastMonologueMoment(
+      entry({ date: '2026-08-14', timestamp: Date.parse('2026-08-14T06:00:00Z') }),
+      makeChar('Asia/Shanghai'),
+      '2026-08-14',
+    );
+    expect(moment).toContain('就在今天');
+  });
+
+  it('角色时区决定墙上时间，不是设备本地时间', () => {
+    // 同一个绝对时刻：上海是 14:00（下午），伦敦是 07:00（早上）。
+    const at = entry({ date: '2026-08-14', timestamp: Date.parse('2026-08-14T06:00:00Z') });
+    expect(describeLastMonologueMoment(at, makeChar('Asia/Shanghai'), '2026-08-14')).toContain('下午14:00');
+    expect(describeLastMonologueMoment(at, makeChar('Europe/London'), '2026-08-14')).toContain('早上7:00');
   });
 });
 

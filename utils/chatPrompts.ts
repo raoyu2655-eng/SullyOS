@@ -19,6 +19,7 @@ import { buildLifeRecordInjection } from './lifeRecords';
 import { isWorkerReachableUrl } from './amsgToolPack';
 import { isAmsg2EnabledForChar } from './amsg2Tasks';
 import { getCharNameById } from './charNameRegistry';
+import { buildMonologuePromptBlock, countMessagesSinceLast } from './charMonologue';
 import { getLocalDateKey } from './localDate';
 import { getDailyScheduleForChar } from './dailySchedule';
 import { formatRelativeAge } from './groupChat/relativeTime';
@@ -989,6 +990,30 @@ ${voiceActingGuide()}`;
         } else {
             // Voice is disabled — explicitly prohibit voice tags to prevent inertia from call/date history
             baseSystemPrompt += `\n\n[系统提示: 语音消息功能当前未开启。严禁使用 <语音>...</语音> 和 <字幕>...</字幕> 标签。所有回复必须是纯文字消息。]`;
+        }
+
+        // ── 私人记录（角色独白，plans/char-monologue.md）──
+        //
+        // **闸关着就一个字都不注入**：模型不知道有这个标记，就刷不起来，也不用每轮白带
+        // 三百多字。写完之后那道闸（judgeMonologueGate）照旧兜底，两层都在。
+        //
+        // 不烤进 fire pack：「这一轮准不准写」是打包这一刻的状态，到触发时早就过期了
+        // （同上面 forFirePack 的口径）。即时对话那条路照常带——worker 立刻就生成，
+        // 这一刻的判定就是新鲜的。
+        if (!forFirePack) {
+            try {
+                const existingMonologues = await DB.getMonologuesByCharId(char.id);
+                const monologueBlock = buildMonologuePromptBlock({
+                    char,
+                    userName: userProfile?.name || '对方',
+                    existing: existingMonologues,
+                    messagesSinceLast: countMessagesSinceLast(currentMsgs, existingMonologues),
+                });
+                if (monologueBlock) baseSystemPrompt += `\n\n${monologueBlock}`;
+            } catch (error) {
+                // 读不出来就当这一轮没资格写。为一段可选的注入拦住整个回复不值得。
+                console.warn('[Monologue] 取独白列表失败，这一轮不注入私人记录', error);
+            }
         }
 
         // 总纲：放在整段上下文最末尾，借 recency 抢最强注意力——这是模型生成下一轮前
