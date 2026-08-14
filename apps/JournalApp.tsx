@@ -2,7 +2,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useOS } from '../context/OSContext';
 import { DB } from '../utils/db';
-import { CharacterProfile, DiaryEntry, StickerData, DiaryPage, MemoryFragment } from '../types';
+import { CharacterProfile, CharMonologueEntry, DiaryEntry, StickerData, DiaryPage, MemoryFragment } from '../types';
 import { ContextBuilder } from '../utils/context';
 import { processImage } from '../utils/file';
 import Modal from '../components/os/Modal';
@@ -13,6 +13,7 @@ import { getRoomLabel } from '../utils/memoryPalace/types';
 import { Sparkle, Archive } from '@phosphor-icons/react';
 import { CharacterGroupFilterBar, filterCharactersByGroup, GROUP_FILTER_ALL } from '../components/character/CharacterGroupFilter';
 import { trackEvent } from '../utils/analytics';
+import { monologueClockLabel } from '../utils/charMonologue';
 
 const INTRO_SEEN_KEY = 'journal_app_intro_seen_v4';
 
@@ -66,10 +67,15 @@ const getLocalDateStr = () => {
 const JournalApp: React.FC = () => {
     const { closeApp, characters, activeCharacterId, apiConfig, addToast, userProfile, updateCharacter, memoryPalaceConfig, characterGroups } = useOS();
 
-    const [mode, setMode] = useState<'select' | 'calendar' | 'write'>('select');
+    // 'monologue' = 角色独白列表；'monologue-read' = 只读的那一页。
+    // 独白刻意不进 'write' 那条路：换纸、贴贴纸、双 tab 都是「交换」的语法，而这一页没有交换。
+    const [mode, setMode] = useState<'select' | 'calendar' | 'write' | 'monologue' | 'monologue-read'>('select');
     const [selectedChar, setSelectedChar] = useState<CharacterProfile | null>(null);
     const [journalGroupId, setJournalGroupId] = useState<string>(GROUP_FILTER_ALL); // 选日记本页的分组筛选
     const [diaries, setDiaries] = useState<DiaryEntry[]>([]);
+    // 角色独白（plans/char-monologue.md）。新的在前——DB 那侧已经排好，这里不再排一次。
+    const [monologues, setMonologues] = useState<CharMonologueEntry[]>([]);
+    const [openMonologue, setOpenMonologue] = useState<CharMonologueEntry | null>(null);
     const [currentEntry, setCurrentEntry] = useState<DiaryEntry | null>(null);
     const [selectedDate, setSelectedDate] = useState<string>(getLocalDateStr());
 
@@ -119,6 +125,7 @@ const JournalApp: React.FC = () => {
                 setSelectedChar(initial);
                 setMode('calendar');
                 loadDiaries(initial.id);
+                loadMonologues(initial.id);
             }
         }
         // Load custom stickers from new journal store
@@ -130,10 +137,31 @@ const JournalApp: React.FC = () => {
         setDiaries(list.sort((a, b) => b.date.localeCompare(a.date)));
     };
 
+    const loadMonologues = async (charId: string) => {
+        setMonologues(await DB.getMonologuesByCharId(charId));
+    };
+
+    const unreadMonologueCount = monologues.filter(m => !m.readAt).length;
+
     const handleCharSelect = (char: CharacterProfile) => {
         setSelectedChar(char);
         setMode('calendar');
         loadDiaries(char.id);
+        loadMonologues(char.id);
+    };
+
+    /**
+     * 翻开一篇独白。**打开即销未读**——这里是 readAt 唯一被写的地方。
+     *
+     * 它只喂界面上那个小红点：角色那侧没有「被看过」这个概念，任何 prompt 组装都不许读它
+     * （plans/char-monologue.md 的第一条不变量，utils/charMonologue.test.ts 有守卫钉着）。
+     */
+    const readMonologue = async (entry: CharMonologueEntry) => {
+        setOpenMonologue(entry);
+        setMode('monologue-read');
+        if (entry.readAt) return;
+        await DB.markMonologueRead(entry.id);
+        if (selectedChar) loadMonologues(selectedChar.id);
     };
 
     const openEntry = (date: string) => {
@@ -941,6 +969,83 @@ ${charPart}
         );
     }
 
+    // ─── 独白列表 ───
+    // 深色到底：这一屏跟交换日记不是一回事，视觉上不该有任何暧昧。
+    if (mode === 'monologue' && selectedChar) {
+        return (
+            <div className="h-full w-full bg-slate-900 flex flex-col font-light">
+                <div className="pb-6 px-6 bg-slate-800 shadow-lg shrink-0 rounded-b-[2rem] z-20" style={{ paddingTop: 'max(3rem, var(--safe-top))' }}>
+                    <div className="flex justify-between items-start mb-4">
+                        <button onClick={() => setMode('calendar')} className="text-white/60 hover:text-white transition-colors" aria-label="返回">
+                            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-6 h-6"><path strokeLinecap="round" strokeLinejoin="round" d="M10.5 19.5 3 12m0 0 7.5-7.5M3 12h18" /></svg>
+                        </button>
+                        <div className="w-6" />
+                    </div>
+                    <div className="text-white">
+                        <div className="text-xs opacity-40 uppercase tracking-widest font-bold mb-1">Private</div>
+                        <div className="text-3xl font-bold tracking-tight">{selectedChar.name}自己写的</div>
+                    </div>
+                </div>
+
+                <div className="flex-1 overflow-y-auto p-5 pb-20 no-scrollbar space-y-3">
+                    {/* 这句是给 user 的定调：他不知道你在看。功能的味道全在这个错位上，
+                        与其藏着，不如把它明说出来——那点不安正是这一页的价值。 */}
+                    <p className="text-[11px] text-slate-500 leading-relaxed px-1 pb-2">
+                        他以为没有人会读到这些。
+                    </p>
+                    {monologues.map(m => (
+                        <button
+                            key={m.id}
+                            onClick={() => readMonologue(m)}
+                            className="w-full flex items-center gap-4 p-4 rounded-2xl bg-slate-800/60 border border-white/5 text-left active:scale-95 transition-all hover:bg-slate-800"
+                        >
+                            <div className="w-14 h-14 bg-slate-900/60 rounded-xl flex flex-col items-center justify-center text-slate-300 shrink-0 border border-white/5">
+                                <span className="text-[10px] font-bold opacity-50">{m.date.split('-')[1]}月</span>
+                                <span className="text-xl font-bold leading-none">{m.date.split('-')[2]}</span>
+                            </div>
+                            <div className="flex-1 min-w-0">
+                                {/* 依旧不显示正文。点进去才读得到。 */}
+                                <p className="text-sm text-slate-200 font-medium">
+                                    {monologueClockLabel(m, selectedChar)}
+                                    {m.mood ? <span className="text-slate-400 font-normal"> · {m.mood}</span> : ''}
+                                </p>
+                                <p className="text-[11px] text-slate-500 font-mono mt-1">{m.date.split('-')[0]}</p>
+                            </div>
+                            {!m.readAt && <span className="w-2 h-2 rounded-full bg-rose-400 shrink-0 animate-pulse" />}
+                        </button>
+                    ))}
+                </div>
+            </div>
+        );
+    }
+
+    // ─── 独白正文（只读）───
+    // 没有 tab、没有纸张选择器、不能贴贴纸——那些都是「交换」的语法，这一页没有交换。
+    if (mode === 'monologue-read' && openMonologue && selectedChar) {
+        return (
+            <div className="h-full w-full bg-slate-900 flex flex-col font-light">
+                <div className="px-6 pb-5 shrink-0" style={{ paddingTop: 'max(3rem, var(--safe-top))' }}>
+                    <button onClick={() => setMode('monologue')} className="text-white/60 hover:text-white transition-colors mb-5" aria-label="返回">
+                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-6 h-6"><path strokeLinecap="round" strokeLinejoin="round" d="M10.5 19.5 3 12m0 0 7.5-7.5M3 12h18" /></svg>
+                    </button>
+                    <div className="text-slate-400 text-xs font-mono">
+                        {openMonologue.date} · {monologueClockLabel(openMonologue, selectedChar)}
+                    </div>
+                    {openMonologue.mood && (
+                        <div className="text-slate-200 text-2xl font-bold tracking-tight mt-1">{openMonologue.mood}</div>
+                    )}
+                </div>
+
+                <div className="flex-1 overflow-y-auto px-6 pb-24 no-scrollbar">
+                    {/* whitespace-pre-wrap：他分的段就是他分的段，不替他重排。 */}
+                    <p className="text-[15px] leading-loose text-slate-300 whitespace-pre-wrap">
+                        {openMonologue.text}
+                    </p>
+                </div>
+            </div>
+        );
+    }
+
     if (mode === 'calendar' && selectedChar) {
         return (
             <div className="h-full w-full bg-white flex flex-col font-light relative">
@@ -963,7 +1068,34 @@ ${charPart}
                     <button onClick={() => openEntry(getLocalDateStr())} className="w-full py-5 mb-8 border-2 border-dashed border-amber-200 rounded-2xl text-amber-500 font-bold flex items-center justify-center gap-2 hover:bg-amber-50 active:scale-95 transition-all">
                         <span className="text-xl">+</span> 写今天的日记
                     </button>
-                    
+
+                    {/* 他自己写的那一页（plans/char-monologue.md）。
+                        **一篇都没有时整张卡不渲染**——与其让你点进一个空房间，不如让它第一次
+                        出现的那一刻是个真正的发现：某天翻开本子，里面多了一样东西。
+                        配色刻意离开琥珀：琥珀是「我们俩」的颜色，这一页不是。 */}
+                    {monologues.length > 0 && (
+                        <button
+                            onClick={() => setMode('monologue')}
+                            className="w-full mb-8 p-4 rounded-2xl bg-slate-800 text-left active:scale-95 transition-all hover:bg-slate-700 shadow-lg shadow-slate-900/20 flex items-center gap-4"
+                        >
+                            <div className="flex-1 min-w-0">
+                                <div className="flex items-center gap-2">
+                                    <span className="text-sm font-bold text-white">他自己写的</span>
+                                    {unreadMonologueCount > 0 && (
+                                        <span className="w-1.5 h-1.5 rounded-full bg-rose-400 shadow-sm animate-pulse" />
+                                    )}
+                                </div>
+                                {/* 列表里不剧透正文——只给时刻和心境词。「翻开」那个动作是这一页的全部重量，
+                                    摘要会把它稀释掉。 */}
+                                <p className="text-[11px] text-slate-400 mt-1 truncate">
+                                    最近一篇：{monologueClockLabel(monologues[0], selectedChar)}
+                                    {monologues[0].mood ? ` · ${monologues[0].mood}` : ''}
+                                </p>
+                            </div>
+                            <span className="text-xs font-mono text-slate-500 shrink-0">{monologues.length}</span>
+                        </button>
+                    )}
+
                     <div className="space-y-4">
                         {diaries.map(d => (
                             <div key={d.id} onClick={() => openEntry(d.date)} className="flex items-center gap-4 p-4 rounded-2xl bg-white border border-slate-100 shadow-sm active:scale-95 transition-all hover:shadow-md cursor-pointer relative overflow-hidden group">

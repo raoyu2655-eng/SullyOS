@@ -128,14 +128,24 @@ const dayPartLabel = (hour: number): string => {
  *
  * 墙上时间按**角色所在时区**算（docs/character-timezone.md：别用设备本地时间）。
  */
+/**
+ * 他写下这一篇时，**他那边**的墙上时间：`凌晨2:14`。
+ *
+ * 界面和 prompt 共用一份——凌晨两点写的和下午三点写的是两种东西，这个差别在哪儿
+ * 都得是同一个说法，两处各写一套迟早会漂。
+ */
+export const monologueClockLabel = (entry: CharMonologueEntry, char: CharacterProfile): string => {
+  const wall = nowInTimeZone(resolveCharTimeZone(char), new Date(entry.timestamp));
+  return `${dayPartLabel(wall.getHours())}${wall.getHours()}:${String(wall.getMinutes()).padStart(2, '0')}`;
+};
+
 export const describeLastMonologueMoment = (
   entry: CharMonologueEntry,
   char: CharacterProfile,
   todayKey: string,
 ): string => {
   const wall = nowInTimeZone(resolveCharTimeZone(char), new Date(entry.timestamp));
-  const clock = `${dayPartLabel(wall.getHours())}${wall.getHours()}:${String(wall.getMinutes()).padStart(2, '0')}`;
-  const absolute = `${wall.getMonth() + 1}月${wall.getDate()}日 ${clock}`;
+  const absolute = `${wall.getMonth() + 1}月${wall.getDate()}日 ${monologueClockLabel(entry, char)}`;
 
   const dayGap = getCalendarDayDifference(entry.date, todayKey);
   const relative = dayGap === null ? null
