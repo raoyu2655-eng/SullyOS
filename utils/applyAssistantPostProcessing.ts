@@ -181,7 +181,9 @@ export type PostProcessDirective =
     // Notion / 飞书 写日记 — worker classifier 提取 title/content/mood, 我们拼回原 tag 给
     // line 465 (Notion) / 649 (飞书) 既有 handler 跑. title 可空, 客户端兜底.
     | { type: 'notion_write_diary'; title: string; content: string; mood?: string }
-    | { type: 'feishu_write_diary'; title: string; content: string; mood?: string };
+    | { type: 'feishu_write_diary'; title: string; content: string; mood?: string }
+    // 角色独白 — 拼回原 tag 给 5.6b 那个既有分支跑（闸、落库、剥离都在那儿，不另写一份）。
+    | { type: 'char_monologue'; text: string; mood?: string };
 
 /**
  * 把结构化 directive 反向拼回原 tag 字符串. 拼回的目的是让下游 chatParser.parseAndExecuteActions
@@ -260,6 +262,11 @@ function reconstructDirectiveTags(directives: PostProcessDirective[] | undefined
                 parts.push(`[[FS_DIARY_START: ${header}]]\n${d.content}\n[[FS_DIARY_END]]`);
                 break;
             }
+            // 独白：拼回去之后由 5.6b 分支消费。心境词是一个词、不含 `|`，
+            // 所以不像日记那样有 header 切分的边界问题。
+            case 'char_monologue':
+                parts.push(`[[MONOLOGUE_START: ${d.mood ?? ''}]]\n${d.text}\n[[MONOLOGUE_END]]`);
+                break;
             default:
                 console.warn('[directive-replay] unknown directive type, skipping', d);
         }

@@ -380,12 +380,39 @@ describe('即时对话能力探测（instantTick）', () => {
     (ActiveMsgStore.saveGlobalConfig as any).mockClear();
     configCheck({ instantChat: true, instantTick: false });
     await ActiveMsgClient.probeInstantChatSupport();
-    expect(ActiveMsgStore.saveGlobalConfig).toHaveBeenCalledWith({ instantChatSupported: false });
+    expect(ActiveMsgStore.saveGlobalConfig).toHaveBeenCalledWith({
+      instantChatSupported: false, monologueSupported: false,
+    });
 
     (ActiveMsgStore.saveGlobalConfig as any).mockClear();
     configCheck({ instantChat: true, instantTick: true });
     await ActiveMsgClient.probeInstantChatSupport();
-    expect(ActiveMsgStore.saveGlobalConfig).toHaveBeenCalledWith({ instantChatSupported: true });
+    expect(ActiveMsgStore.saveGlobalConfig).toHaveBeenCalledWith({
+      instantChatSupported: true, monologueSupported: false,
+    });
+  });
+
+  // 独白能力位搭同一趟车（同一份 config-check 响应，不多打一次往返）。
+  //
+  // ⚠️ 老 worker 上这一位必须是 false：它不认 [[MONOLOGUE_START]]，会把整段回复切成多条
+  // 分别推回来，成对标记跨条之后客户端逐条扫永远匹配不到——那篇「他心里最深的想法」就
+  // 原样当聊天发到用户手机上了（2026-08-14 真出过）。所以这里钉的是「字段缺席 = 不支持」。
+  it('worker 报 charMonologue 才算支持，老 bundle 缺这个字段一律 false', async () => {
+    const { ActiveMsgStore } = await import('./activeMsgStore');
+
+    (ActiveMsgStore.saveGlobalConfig as any).mockClear();
+    configCheck({ instantChat: true, instantTick: true, charMonologue: true });
+    await ActiveMsgClient.probeInstantChatSupport();
+    expect(ActiveMsgStore.saveGlobalConfig).toHaveBeenCalledWith({
+      instantChatSupported: true, monologueSupported: true,
+    });
+
+    (ActiveMsgStore.saveGlobalConfig as any).mockClear();
+    configCheck({ instantChat: true, instantTick: true }); // 老 bundle：字段缺席
+    await ActiveMsgClient.probeInstantChatSupport();
+    expect(ActiveMsgStore.saveGlobalConfig).toHaveBeenCalledWith({
+      instantChatSupported: true, monologueSupported: false,
+    });
   });
 });
 

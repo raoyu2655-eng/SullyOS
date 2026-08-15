@@ -398,6 +398,15 @@ export interface ActiveMsg2GlobalConfig {
    * 一份凭据，也不要拿新写法去撞一台还不认识它的 Worker。握手时会探一次。
    */
   llmCredentialsSupported?: boolean;
+  /**
+   * 上一次探到的「这台 Worker 认不认 [[MONOLOGUE_START]]」（config-check 的 charMonologue）。
+   *
+   * 即时对话那条路上，回复由 worker 生成并**切成多条**推回来；worker 不认这个标记的话
+   * 成对标记会被切散，客户端逐条扫永远匹配不到，那篇独白就原样当聊天发到用户手机上
+   * （2026-08-14 真出过）。所以 false / undefined 一律不注入——宁可这个功能在旧 worker 上
+   * 是哑的，也不能让它把心里话念出来。
+   */
+  monologueSupported?: boolean;
   updatedAt?: number;
 }
 

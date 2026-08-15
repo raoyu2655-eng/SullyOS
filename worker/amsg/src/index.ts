@@ -2801,6 +2801,12 @@ export default {
           ...inspectWorkerEnv(env),
           instantChat: true,
           instantTick: !!env.INSTANT_TICK,
+          // 这台 worker 认不认 [[MONOLOGUE_START]]（把它提成 directive 而不是当正文推走）。
+          // 客户端**只在这一位为真时**才往即时对话的 prompt 里注入独白说明——老 worker 上
+          // 注入等于把「他心里最深的想法」原样发到用户手机上（2026-08-14 的事故）。
+          // 跟 instantChat 一样是写死的字面量：它描述的是这份代码有没有这段解析，
+          // 不依赖任何运行时绑定。
+          charMonologue: true,
           workerVersion: AMSG_BUNDLE_VERSION,
         },
       });

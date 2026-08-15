@@ -20,6 +20,7 @@ import { isWorkerReachableUrl } from './amsgToolPack';
 import { isAmsg2EnabledForChar } from './amsg2Tasks';
 import { getCharNameById } from './charNameRegistry';
 import { buildMonologuePromptBlock, countMessagesSinceLast } from './charMonologue';
+import { ActiveMsgStore } from './activeMsgStore';
 import { getLocalDateKey } from './localDate';
 import { getDailyScheduleForChar } from './dailySchedule';
 import { formatRelativeAge } from './groupChat/relativeTime';
@@ -1009,22 +1010,27 @@ ${voiceActingGuide()}`;
         // 两条路都不注入：
         //
         // - forFirePack：「这一轮准不准写」是打包这一刻的状态，到触发时早就过期了。
-        // - timelyByWorker（即时对话）：**worker 不认识这个标记**。它的分类器里没有
-        //   MONOLOGUE，不会提取，然后把整段回复切成 N 条分别推过来——而 START...END 是
-        //   跨条的，客户端逐条后处理时正则永远匹配不到。结果就是那篇独白**原样当聊天发出去**
-        //   （2026-08-14 实际发生过：满屏第三人称的内心戏直接进了聊天流）。
-        //   要在这条路上支持，得先让 worker 侧认这个标记并结构化传回来（同 DIARY 那套
-        //   directive 通道），在那之前一个字都不许注入——不给机会比事后补救干净。
-        if (!forFirePack && !timelyByWorker) {
+        // - timelyByWorker（即时对话）：只有**那台 worker 认这个标记**时才注入。
+        //   它不认的话，标记不会被提成 directive，而整段回复会被切成 N 条分别推回来——
+        //   成对标记跨条之后，客户端逐条后处理时正则永远匹配不到，那篇独白就原样当聊天
+        //   发到用户手机上（2026-08-14 实际发生过：满屏第三人称的内心戏进了聊天流）。
+        //   能力位来自 config-check 的 charMonologue，undefined（老 worker）按不支持处理。
+        if (!forFirePack) {
             try {
-                const existingMonologues = await DB.getMonologuesByCharId(char.id);
-                const monologueBlock = buildMonologuePromptBlock({
-                    char,
-                    userName: userProfile?.name || '对方',
-                    existing: existingMonologues,
-                    messagesSinceLast: countMessagesSinceLast(currentMsgs, existingMonologues),
-                });
-                if (monologueBlock) baseSystemPrompt += `\n\n${monologueBlock}`;
+                // 能力位读的是**存量**（握手时探过、存进全局配置，见 probeInstantChatSupport），
+                // 不在这儿现探——组 prompt 是每条消息的热路径，为一段可选注入加一次 RTT 不值。
+                const workerReady = !timelyByWorker
+                    || (await ActiveMsgStore.getGlobalConfig()).monologueSupported === true;
+                if (workerReady) {
+                    const existingMonologues = await DB.getMonologuesByCharId(char.id);
+                    const monologueBlock = buildMonologuePromptBlock({
+                        char,
+                        userName: userProfile?.name || '对方',
+                        existing: existingMonologues,
+                        messagesSinceLast: countMessagesSinceLast(currentMsgs, existingMonologues),
+                    });
+                    if (monologueBlock) baseSystemPrompt += `\n\n${monologueBlock}`;
+                }
             } catch (error) {
                 // 读不出来就当这一轮没资格写。为一段可选的注入拦住整个回复不值得。
                 console.warn('[Monologue] 取独白列表失败，这一轮不注入私人记录', error);

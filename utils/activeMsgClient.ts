@@ -2441,15 +2441,21 @@ export const ActiveMsgClient = {
    */
   async probeInstantChatSupport(): Promise<boolean> {
     let supported = false;
+    // 「这台 worker 认不认独白标记」搭同一趟车：两个结论都在 config-check 的同一份
+    // 响应里，分两次探等于给每次握手白加一个 RTT。探不到一律 false（老 worker 没这个字段）。
+    let monologueSupported = false;
     try {
       const config = await ensureWorkerReady();
       const { status, body } = await fetchWithAuthRaw('config-check', config, { method: 'GET' }, '即时对话能力探测');
-      supported = status === 200 && body?.success === true && body?.data?.instantTick === true;
+      const ok = status === 200 && body?.success === true;
+      supported = ok && body?.data?.instantTick === true;
+      monologueSupported = ok && body?.data?.charMonologue === true;
     } catch {
       supported = false;
+      monologueSupported = false;
     }
     try {
-      await ActiveMsgStore.saveGlobalConfig({ instantChatSupported: supported });
+      await ActiveMsgStore.saveGlobalConfig({ instantChatSupported: supported, monologueSupported });
     } catch (error) {
       // 存不下只是这一轮的判断留不到下次，探测结论本身照常返回。
       console.warn('[AmsgInstantChat] 能力探测结果没存下来（下次发消息按上一次的存量判断）', error);

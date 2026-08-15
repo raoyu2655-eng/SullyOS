@@ -9782,7 +9782,7 @@ var stripSourceTags = (t) => t.replace(/\s*\[(?:聊天|通话|约会)\]\s*/g, "\
 var stripTimestamps = (t) => t.replace(/\[\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}\]\s*/g, "").replace(/^\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}\s*/gm, "").replace(/（[上下]午\d{1,2}[：:]\d{2}）/g, "").replace(/\(\d{1,2}:\d{2}\s*[AP]M\)/gi, "");
 var stripChineseDate = (t) => t.replace(/\[\d{4}[-/年]\d{1,2}[-/月]\d{1,2}.*?\]/g, "");
 var stripRoleNamePrefix = (t) => t.replace(/^[\w一-龥]+:\s*/, "");
-var stripBusinessTagsForBubble = (t) => t.replace(/\[\[(?:ACTION|RECALL|SEARCH|DIARY|READ_DIARY|FS_DIARY|FS_READ_DIARY|DIARY_START|DIARY_END|FS_DIARY_START|FS_DIARY_END|MUSIC_ACTION)[:\s][\s\S]*?\]\]/g, "").replace(/\[\[\s*[记記][录錄]\s*[:：][\s\S]*?\]\]/g, "").replace(/\[schedule_message[^\]]*\]/g, "");
+var stripBusinessTagsForBubble = (t) => t.replace(/\[\[(?:ACTION|RECALL|SEARCH|DIARY|READ_DIARY|FS_DIARY|FS_READ_DIARY|DIARY_START|DIARY_END|FS_DIARY_START|FS_DIARY_END|MUSIC_ACTION)[:\s][\s\S]*?\]\]/g, "").replace(/\[\[MONOLOGUE_START[:\s][\s\S]*?\[\[MONOLOGUE_END\]\]/g, "").replace(/\[\[MONOLOGUE_(?:START|END)[^\]]*\]\]/g, "").replace(/\[\[\s*[记記][录錄]\s*[:：][\s\S]*?\]\]/g, "").replace(/\[schedule_message[^\]]*\]/g, "");
 var stripBusinessTagsForNotification = (t) => stripBusinessTagsForBubble(t).replace(/\[\[(?:READ_NOTE|XHS_[A-Z_]+|LIFE|NEWS_CARD)[:\s][\s\S]*?\]\]/g, "").replace(/\[\[XHS_[A-Z_]+\]\]/g, "");
 var stripAllDoubleBracketTags = (t) => t.replace(/\[\[[\s\S]*?\]\]/g, "");
 var stripQuotes2 = (t) => t.replace(/\[\[(?:QU[OA]TE|引用)[：:][\s\S]*?\]\]/g, "").replace(/\[(?:QU[OA]TE|引用)[：:][^\]]*\]/g, "").replace(/\[回复\s*[""“][^""”]*?[""”](?:\.{0,3})\]\s*[：:]?\s*/g, "").replace(/\[[^\[\]\n「」]{0,24}引用了[^\[\]\n「」]{0,24}「[^」\n]*?」[^\[\]\n]{0,24}\]\s*/g, "");
@@ -10345,6 +10345,18 @@ var SIDE_EFFECT_TAGS = [
   {
     re: /\[\[FS_DIARY:\s*([\s\S]+?)\]\]/g,
     toDirective: (m) => parseDiaryShort(m, "feishu_write_diary")
+  },
+  // 角色独白 — 只有长形态，没有短形态：正文是 100–800 字，单行 tag 装不下。
+  // header 是心境词（可空），跟日记不同**不按 `|` 切**——那是一个词，不是 title|mood。
+  // 正文空的当模型误触发丢掉（返回 null，标记照样从正文里剥干净）。
+  {
+    re: /\[\[MONOLOGUE_START:\s*(.*?)\]\]\n?([\s\S]*?)\[\[MONOLOGUE_END\]\]/g,
+    toDirective: (m) => {
+      const text = (m[2] || "").trim();
+      if (!text) return null;
+      const mood = (m[1] || "").trim();
+      return { type: "char_monologue", text, mood: mood || void 0 };
+    }
   }
 ];
 function parseDiaryLong(m, type) {
@@ -12143,6 +12155,12 @@ var src_default = {
           ...inspectWorkerEnv(env),
           instantChat: true,
           instantTick: !!env.INSTANT_TICK,
+          // 这台 worker 认不认 [[MONOLOGUE_START]]（把它提成 directive 而不是当正文推走）。
+          // 客户端**只在这一位为真时**才往即时对话的 prompt 里注入独白说明——老 worker 上
+          // 注入等于把「他心里最深的想法」原样发到用户手机上（2026-08-14 的事故）。
+          // 跟 instantChat 一样是写死的字面量：它描述的是这份代码有没有这段解析，
+          // 不依赖任何运行时绑定。
+          charMonologue: true,
           workerVersion: AMSG_BUNDLE_VERSION
         }
       });

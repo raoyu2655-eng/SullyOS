@@ -70,7 +70,12 @@ export type Directive =
   // 写日记: 短形态 [[DIARY: title|content]] 或长形态 [[DIARY_START: title|mood]]\n content \n[[DIARY_END]],
   // 飞书同形态 (FS_ 前缀). title 可空 → 客户端兜底用 `${char.name}的日记 - M/D`. mood 可空.
   | { type: 'notion_write_diary'; title: string; content: string; mood?: string }
-  | { type: 'feishu_write_diary'; title: string; content: string; mood?: string };
+  | { type: 'feishu_write_diary'; title: string; content: string; mood?: string }
+  // 角色独白 [[MONOLOGUE_START: 心境]]\n 正文 \n[[MONOLOGUE_END]]（plans/char-monologue.md）。
+  // **必须走 directive**，不能留在正文里：worker 会把回复切成 N 条分别推，成对标记跨条之后
+  // 客户端逐条扫永远匹配不到，那篇「他心里最深的想法」就原样当聊天发到用户手机上了
+  // （2026-08-14 真出过这个事故）。mood 可空。
+  | { type: 'char_monologue'; text: string; mood?: string };
 
 export type ClassificationResult =
   | {
@@ -271,6 +276,18 @@ const SIDE_EFFECT_TAGS: SideEffectSpec[] = [
   {
     re: /\[\[FS_DIARY:\s*([\s\S]+?)\]\]/g,
     toDirective: (m) => parseDiaryShort(m, 'feishu_write_diary'),
+  },
+  // 角色独白 — 只有长形态，没有短形态：正文是 100–800 字，单行 tag 装不下。
+  // header 是心境词（可空），跟日记不同**不按 `|` 切**——那是一个词，不是 title|mood。
+  // 正文空的当模型误触发丢掉（返回 null，标记照样从正文里剥干净）。
+  {
+    re: /\[\[MONOLOGUE_START:\s*(.*?)\]\]\n?([\s\S]*?)\[\[MONOLOGUE_END\]\]/g,
+    toDirective: (m) => {
+      const text = (m[2] || '').trim();
+      if (!text) return null;
+      const mood = (m[1] || '').trim();
+      return { type: 'char_monologue', text, mood: mood || undefined };
+    },
   },
 ];
 

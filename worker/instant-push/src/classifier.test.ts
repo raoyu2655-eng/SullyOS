@@ -373,3 +373,52 @@ describe('classifyLLMOutput — 同一条消息里重复的副作用只出一个
     }
   });
 });
+
+// ─── 角色独白 directive（plans/char-monologue.md）───────────────────────────
+//
+// 这一组守的是一个真出过的事故（2026-08-14）：worker 不认这个标记时，整段回复会被切成
+// 多条分别推给客户端，成对标记跨条之后客户端逐条扫永远匹配不到——那篇「他心里最深的
+// 想法」就原样当聊天发到用户手机上了。所以必须在这里就提成 directive，一个字都不许留在
+// cleanedText 里。
+describe('角色独白 → char_monologue directive', () => {
+  it('成对标记提成 directive，正文一个字都不留在 cleanedText', () => {
+    const r = classifyLLMOutput('晚安。\n[[MONOLOGUE_START: 厌倦]]\n她大概永远不会知道。\n[[MONOLOGUE_END]]');
+    expect(r.kind).toBe('finish');
+    if (r.kind === 'finish') {
+      expect(r.cleanedText).toBe('晚安。');
+      expect(r.cleanedText).not.toContain('她大概永远不会知道');
+      expect(r.directives).toEqual([{
+        type: 'char_monologue',
+        text: '她大概永远不会知道。',
+        mood: '厌倦',
+      }]);
+    }
+  });
+
+  it('心境词留空 → mood 不带上（不替模型编一个）', () => {
+    const r = classifyLLMOutput('[[MONOLOGUE_START: ]]\n只是有点累。\n[[MONOLOGUE_END]]');
+    expect(r.kind).toBe('finish');
+    if (r.kind === 'finish') {
+      expect(r.directives).toEqual([{ type: 'char_monologue', text: '只是有点累。' }]);
+    }
+  });
+
+  // 心境是一个词，不是日记那种 title|mood —— 含 `|` 也整段当心境，不切。
+  it('心境词里带 `|` 也不切分', () => {
+    const r = classifyLLMOutput('[[MONOLOGUE_START: 厌倦|不甘]]\n随便写点。\n[[MONOLOGUE_END]]');
+    expect(r.kind).toBe('finish');
+    if (r.kind === 'finish') {
+      expect(r.directives).toEqual([{ type: 'char_monologue', text: '随便写点。', mood: '厌倦|不甘' }]);
+    }
+  });
+
+  it('正文是空的 → 当误触发丢掉，但标记照样从正文里剥干净', () => {
+    const r = classifyLLMOutput('嗯。\n[[MONOLOGUE_START: 厌倦]]\n\n[[MONOLOGUE_END]]');
+    expect(r.kind).toBe('finish');
+    if (r.kind === 'finish') {
+      expect(r.cleanedText).toBe('嗯。');
+      expect(r.cleanedText).not.toContain('MONOLOGUE');
+      expect(r.directives ?? []).toEqual([]);
+    }
+  });
+});
