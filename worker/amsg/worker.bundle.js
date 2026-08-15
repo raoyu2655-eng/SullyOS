@@ -5607,7 +5607,7 @@ function createWebCryptoWebPush(vapid = {}, { ttl = SCHEDULED_DEFAULT_TTL } = {}
 }
 
 // utils/amsgBundleVersion.ts
-var AMSG_BUNDLE_VERSION = "2026-08-10.3";
+var AMSG_BUNDLE_VERSION = "2026-08-15";
 
 // utils/localDate.ts
 function getLocalDateKey(date = /* @__PURE__ */ new Date()) {
