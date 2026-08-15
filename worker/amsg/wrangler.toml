@@ -50,8 +50,18 @@ database_id = "REPLACE_WITH_YOUR_D1_ID"
 name = "INSTANT_TICK"
 class_name = "InstantTickDO"
 
+# ⚠️ tag 必须跟 App 一键部署用的那个字面量一致（utils/cfProvision.ts 的
+# INSTANT_TICK_MIGRATIONS.new_tag = 'amsg-instant-tick-v1'）。
+#
+# 两条部署路会落在同一台 Worker 上：先用 App 装、后来在 Cloudflare 上接 Git 自动部署，
+# 是很自然的迁移路径。而 wrangler 部署时会拿线上脚本的 migration tag 跟这份文件里的
+# 列表对账——对不上就拒绝部署：
+#   [WARNING] The published script has a migration tag "amsg-instant-tick-v1",
+#             which was not found in your wrangler.toml
+# 这里原来写的是 "v1"，于是所有「App 装的 + 后来接 Git」的用户，Git 部署一次都成不了。
+# 改这个 tag 不会重跑迁移（DO namespace 早就在了），它只是对账用的名字。
 [[migrations]]
-tag = "v1"
+tag = "amsg-instant-tick-v1"
 new_sqlite_classes = ["InstantTickDO"]
 
 # 每分钟查一次到点任务（UTC）。这是主动消息唯一的投递触发方式——
